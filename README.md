@@ -1,30 +1,68 @@
 # Telegram 个人智能体
 
-这是一个 Telegram-only 的个人智能体项目。它参考 Akashic Agent 的运行时分层，但不引入 QQ、Discord、NapCat 或复杂多通道抽象。当前能力包括：文本对话、Telegram 图片输入、主/次 LLM、工具循环、SKILL.md 技能说明书、长期记忆、提醒、MCP 工具接入、主动 feed source、drift 空闲任务、HyDE/query rewrite 和 SQLite trace。
+一个专注 Telegram 单通道的个人智能体项目，围绕 OpenAI-compatible LLM、长期记忆、提醒、MCP 工具、主动消息和技能说明书构建。它不做多平台抽象，重点是把“陪伴型个人助手”这条链路在本地跑通，并且尽量保持结构清晰、可扩展。
 
-## 架构
+## 项目特点
+
+- Telegram-only，入口简单，部署和排障成本低。
+- 支持文本对话和图片输入，主模型可直接处理多模态消息。
+- 同时维护会话历史、长期记忆、用户画像、摘要和文本档案。
+- 内置工具循环，支持 memory、reminder、网页抓取、文件读写、表情包等能力。
+- 支持 MCP server 接入，可把 DuckDuckGo 搜索、网页正文抓取、RSS/feed 能力接进模型工具链。
+- 支持 `SKILL.md` 说明书机制，让模型按 SOP 工作，而不是只靠 prompt 硬写规则。
+- 支持主动触达：到期提醒、feed 候选、drift 后台整理、轻量 fallback 问候。
+- 内置表情包目录和自动挂图逻辑，也支持把收到的图片直接收录进本地表情包库。
+
+## 当前能力
+
+- 被动对话
+  处理 Telegram 文本、caption 和图片消息，支持白名单用户名控制。
+- 长期记忆
+  支持显式“记住：...”、自然语言偏好抽取、候选记忆晋升、记忆纠正和回忆查询。
+- 提醒系统
+  支持自然语言提醒，例如“1 分钟后提醒我喝水”。
+- 工具循环
+  支持 OpenAI-compatible `tool_calls`，也兼容文本协议 `<tool_call ...>...</tool_call>`。
+- Skills
+  支持内置 skills、`workspace/skills/` 覆盖、依赖检查、catalog 注入和按需全文注入。
+- MCP
+  当前仓库已内置/预留 `duckduckgo`、`web_content`、`feed_bridge`、`rss` 这几类 server 配置。
+- 主动消息
+  后台循环会优先发送到期提醒，再评估 feed、drift 和 fallback 候选，并遵守预算、静默时段、去重和忙碌状态。
+- 表情包系统
+  支持 `list_memes`、`send_meme`，也支持发送图片后用文字把它收录到本地表情包分类。
+
+## 目录结构
 
 ```text
-Telegram Update
-  -> channels/telegram.py
-  -> InboundMessage / Attachment
-  -> loop.py
-  -> context.py
-  -> reasoner.py
-  -> skills catalog / active skills
-  -> tools/registry.py
-  -> memory/store.py + observe/trace.py
-  -> OutboundMessage
-  -> Telegram send
-
-proactive/loop.py
-  -> due reminders
-  -> MCP feed source
-  -> context fallback
-  -> Telegram send
+.
+├─ chat_agent/                 核心 Python 代码
+│  ├─ channels/                Telegram 通道
+│  ├─ memory/                  记忆、摘要、向量检索、文本档案
+│  ├─ mcp/                     MCP client/registry
+│  ├─ proactive/               主动消息、feed、drift
+│  ├─ tools/                   内置工具注册
+│  ├─ context.py               上下文拼装
+│  ├─ loop.py                  被动消息主循环
+│  ├─ reasoner.py              模型推理与工具协调
+│  ├─ skills.py                SKILL.md 加载与注入
+│  └─ memes.py                 表情包目录与自动挂图
+├─ skills/                     项目内置技能说明书
+├─ workspace/                  运行时工作目录
+│  ├─ mcp_servers/             本地 MCP 示例 server
+│  ├─ skills/                  用户自定义 skills
+│  ├─ drift/skills/            drift 专用 skills
+│  └─ memory/                  文本档案输出
+├─ package/                    DuckDuckGo MCP Node 包
+├─ tests/                      单元测试
+├─ main.py                     CLI 入口
+├─ config.example.toml         配置模板
+└─ README.md
 ```
 
-## 安装
+## 快速开始
+
+### 1. 安装依赖
 
 ```powershell
 python -m venv .venv
@@ -33,355 +71,258 @@ pip install -e ".[dev]"
 cd package
 npm install
 cd ..
-python main.py init
-copy config.example.toml config.toml
 ```
 
-`python main.py init` 会创建：
+### 2. 初始化项目目录
+
+```powershell
+python main.py init
+Copy-Item config.example.toml config.toml
+```
+
+`python main.py init` 会在当前仓库下准备这些运行目录和示例文件：
 
 - `workspace/`
 - `logs/`
+- `observe/`
 - `workspace/mcp_servers.json`
 - `workspace/proactive_sources.json`
 - `workspace/drift_tasks.json`
+- `workspace/rss_feeds.opml`
 - `workspace/skills/`
 - `workspace/drift/skills/`
+- `workspace/memory/`
 
-## 配置主/次 LLM
+### 3. 配置环境变量
 
-```toml
-[llm.main]
-model = "qwen-vl-plus"
-api_key = "${QWEN_API_KEY}"
-base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-timeout_seconds = 60
-max_tokens = 4096
-enable_vision = true
-
-[llm.fast]
-model = "qwen-flash"
-api_key = "${QWEN_API_KEY}"
-base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-timeout_seconds = 20
-max_tokens = 1024
-enable_vision = false
-```
-
-`main` 用于普通对话、图片理解、工具循环最终推理。`fast` 用于 query rewrite、HyDE、主动 feed relevance judge 等轻量任务。两者可以用不同模型、不同 base_url 和不同 key。
-
-环境变量：
+默认模板使用 DashScope 的 OpenAI-compatible 接口，你也可以换成任意兼容的模型服务。
 
 ```powershell
 $env:QWEN_API_KEY="your-api-key"
-$env:TELEGRAM_BOT_TOKEN="your-telegram-token"
+$env:TELEGRAM_BOT_TOKEN="your-telegram-bot-token"
 ```
 
-缺少 `${ENV_NAME}` 时会在启动时报清楚。日志会对 token/key 做脱敏。
+### 4. 修改 `config.toml`
 
-## Telegram 图片
+最少要确认这些配置：
 
-配置：
+- `[llm.main]`：主对话模型，负责正常回复、图片理解、最终工具推理。
+- `[llm.fast]`：轻量模型，负责 query rewrite、HyDE、主动消息改写和 tie-break。
+- `[telegram]`：填好 bot token、允许访问的用户名白名单 `allow_from`。
+- `[memory]`：主业务 SQLite 默认是 `workspace/agent.sqlite3`。
+- `[observe]`：观测库默认是 `observe/observe.db`。
 
-```toml
-[telegram]
-download_images = true
-image_max_mb = 10
+### 5. 启动
+
+```powershell
+python main.py
 ```
 
-发送图片时，bot 会生成 `Attachment`，把图片 URL 或本地路径注入上下文。如果 `[llm.main].enable_vision = true`，图片会以 OpenAI-compatible multimodal content 传给主模型。如果主模型不支持 vision，会友好提示“当前主模型不支持图片理解”。
+如果你使用了其他配置文件：
 
-## 工具循环
+```powershell
+python main.py --config path\to\config.toml
+```
 
-支持 OpenAI-compatible `tool_calls`，也保留文本协议：
+## 配置概览
+
+### LLM
+
+`[llm.main]` 和 `[llm.fast]` 都是 OpenAI-compatible 配置。
+
+- `main` 适合主回复和视觉输入。
+- `fast` 适合低成本判断、检索增强和主动系统润色。
+- 当两者指向同一个模型也可以运行，只是性价比更低。
+
+### Telegram
+
+`[telegram]` 里最重要的是：
+
+- `token`
+- `allow_from`
+- `download_images`
+- `image_max_mb`
+
+当 `download_images = true` 时，收到的图片会下载到 `workspace/attachments/`，并作为附件注入上下文。
+
+### 记忆与向量检索
+
+`[memory]` 控制：
+
+- 会话历史窗口
+- 长期记忆召回数量
+- 摘要阈值
+- query rewrite
+- HyDE
+
+`[embedding]` 当前支持两种模式：
+
+- `provider = "sqlite_json"`：不依赖外部服务，向量存在 SQLite。
+- `provider = "chroma"`：把向量检索接到外部 Chroma，记忆正文仍然以 SQLite 为准。
+
+如果你开启 `chroma`，需要先单独启动 Chroma 服务，例如：
+
+```powershell
+chroma run --host localhost --port 8000
+```
+
+### 工具
+
+`[tools]` 控制工具循环和文件工作区。默认文件工作区是 `workspace/files`。
+
+当前内置工具大致分为三层：
+
+- 默认可见：`memorize`、`recall_memory`、`create_reminder`、`list_reminders`、`tool_search`、`list_memes`
+- 可发现：`cancel_reminder`、`web_fetch`、`list_files`、`read_file`、`send_meme`
+- 默认隐藏：`write_file`、`send_message`、`send_emoji`、`create_skill`、`update_skill`
+
+隐藏工具可以通过 `[tools].extra_model_tools` 主动暴露给模型。
+
+### MCP
+
+`[mcp]` 默认从 `workspace/mcp_servers.json` 加载 server 定义。当前模板里包含：
+
+- `duckduckgo`
+- `rss`
+- `web_content`
+- `feed_bridge`
+
+其中：
+
+- `duckduckgo` 依赖 `package/` 里的 Node 包，首次使用前需要执行过 `npm install`
+- `web_content` 是本仓库自带的网页正文预览 MCP server
+- `feed_bridge` 是本仓库自带的 RSS/Atom 到 proactive 事件桥接 server
+- `rss` 示例依赖第三方 `mcp_rss` 和 MySQL，默认关闭
+
+### Skills
+
+`[skills]` 控制 `SKILL.md` 说明书系统。技能来源有两类：
+
+- 项目内置：`skills/<name>/SKILL.md`
+- 工作区覆盖：`workspace/skills/<name>/SKILL.md`
+
+同名时，`workspace` 版本优先。
+
+### 主动系统
+
+主动系统相关配置位于：
+
+- `[proactive.loop]`
+- `[proactive.budget]`
+- `[proactive.feed]`
+- `[proactive.drift]`
+- `[proactive.drift.skills]`
+- `[proactive.fallback]`
+- `[proactive.presence]`
+- `[scheduler]`
+
+如果你希望 bot 主动发消息，至少需要：
+
+- 开启 `[proactive.loop].enabled = true`
+- 设置 `[proactive.loop].target_chat_id`
+- 保持 `[scheduler].enabled = true`
+
+## 运行机制
+
+### 被动对话链路
 
 ```text
-<tool_call name="memorize">
-{"content":"用户喜欢简洁回答","tags":["preference"],"type":"preference"}
-</tool_call>
+Telegram Update
+  -> channels/telegram.py
+  -> InboundMessage
+  -> AgentLoop
+  -> ContextBuilder
+  -> Reasoner
+  -> ToolRegistry / MCP
+  -> SQLiteStore + TraceRecorder
+  -> OutboundMessage
+  -> Telegram send
 ```
 
-内置工具：
-
-- `memorize`
-- `recall_memory`
-- `create_reminder`
-- `list_reminders`
-- `cancel_reminder`
-- `web_fetch`
-- `tool_search`
-
-默认只暴露 always-on 工具。需要更多工具时，模型可以先调用 `tool_search` 解锁。工具循环有最大迭代次数和重复调用防护。
-
-## Skills 说明书
-
-`skills` 是 Akashic 风格的能力说明书系统。它和 tools 的区别是：
+### 主动消息链路
 
 ```text
-tools = Agent 能调用的动作，比如保存记忆、创建提醒、读取网页。
-skills = Agent 做事前看的说明书 / SOP，比如天气查询该怎么问、总结该保留什么。
+ProactiveLoop tick
+  -> due reminders
+  -> feed candidates
+  -> drift result
+  -> fallback candidate
+  -> budget / quiet-hours / dedupe / busy filters
+  -> choose winner
+  -> Telegram send
 ```
 
-skill 是一个目录里的 `SKILL.md`：
+## Skills 说明书系统
+
+这个项目里的 `skills` 不是“可执行函数”，而是给模型读的说明书。
+
+- `tools` 是动作，例如存记忆、读文件、抓网页。
+- `skills` 是 SOP，例如“总结时保留什么”“天气问题该怎么查”。
+
+完整 `SKILL.md` 不会每轮全量注入。系统会先注入一个 catalog 摘要，只有在这些场景下才会加载全文：
+
+- skill 被标记为 `metadata.chat_agent.always = true`
+- 用户显式提到 `@skill-name`
+- 用户显式提到 `skill:skill-name`
+- 用户文本里直接命中 skill 名称
+
+## 记忆系统
+
+当前项目的记忆不是单层结构，而是几条链路一起工作：
+
+- 会话历史：每轮 `user` 和 `assistant` 消息都会进入 `session_messages`
+- 长期记忆：显式记忆、推断记忆、候选记忆、纠正后的记忆都会落库
+- 用户画像：会提取姓名、喜好、禁忌、回复风格等轻量信息
+- 会话摘要：达到阈值后自动刷新
+- 文本档案：在 `workspace/memory/<chat_id>/` 下维护多份 markdown 档案
+
+默认还能处理这些自然语言场景：
+
+- `记住：我喜欢简洁回答`
+- `你记得我喜欢什么？`
+- `不是这个，我喜欢的是...`
+- `对，就是这个`
+
+## 表情包系统
+
+表情包目录默认位于 `workspace/files/memes/`，支持两种用法：
+
+- 显式发送：模型可通过 `list_memes` 和 `send_meme` 选择并发送
+- 自动挂图：系统会根据消息内容、情绪信号、冷却时间和来源策略决定是否自动附图
+
+你也可以把收到的图片直接收录为表情包。例如发一张图，并附带文字：
 
 ```text
-skills/weather/SKILL.md
-workspace/skills/my-skill/SKILL.md
-workspace/drift/skills/my-drift-skill/SKILL.md
+存成表情包：开心
 ```
 
-格式：
-
-```markdown
----
-name: weather
-description: 查询天气。当用户问天气、温度、预报时使用。
-metadata: {"chat_agent":{"always":false,"requires":{"bins":["curl"],"env":[]}}}
----
-
-# Weather
-
-这里写给 Agent 看的操作说明。
-```
-
-配置：
-
-```toml
-[skills]
-enabled = true
-builtin_dir = "skills"
-workspace_dir = "workspace/skills"
-inject_catalog = true
-max_catalog_chars = 4000
-```
-
-每轮 prompt 会注入 skills catalog 摘要，但不会把所有 `SKILL.md` 全量塞进去。完整 skill 只会在这些情况下进入上下文：
-
-- `metadata.chat_agent.always = true`
-- 用户显式提到 `@weather`
-- 用户显式提到 `skill:weather`
-- 用户文本包含 skill name
-
-workspace skill 优先级高于内置 skill，同名会覆盖。`always=true` 会增加每轮 prompt 长度，建议只给非常稳定、必须常驻的规则使用。
-
-依赖检查：
-
-- `requires.bins`：检查本机命令是否存在。
-- `requires.env`：检查环境变量是否存在。
-
-Telegram 命令：
-
-- `/skills`：查看所有 skill、来源和可用状态。
-
-内置工具：
-
-- `list_skills`
-- `read_skill`
-- `create_skill`
-- `update_skill`
-
-这些工具只允许写入 `workspace/skills/`，不会修改项目内置 `skills/`。
-
-## 记忆检索增强
-
-配置：
-
-```toml
-[memory]
-query_rewrite_enabled = true
-hyde_enabled = true
-```
-
-检索流程：
-
-1. fast LLM 判断是否需要检索。
-2. fast LLM 改写检索 query。
-3. HyDE 生成假想记忆。
-4. 分别用 raw query / rewritten query / HyDE query 检索 SQLite。
-5. 合并去重后注入 prompt。
-
-fast LLM 失败时会回退到原始 keyword/LIKE 检索，不阻断主回复。
-
-## MCP 工具
-
-`workspace/mcp_servers.json` 示例：
-
-```json
-{
-  "servers": {
-    "duckduckgo": {
-      "enabled": true,
-      "command": ["node", "package\\bin\\cli.js"],
-      "env": {}
-    },
-    "rss": {
-      "enabled": false,
-      "command": ["npx.cmd", "-y", "mcp_rss"],
-      "env": {
-        "OPML_FILE_PATH": "workspace\\rss_feeds.opml",
-        "DB_HOST": "localhost",
-        "DB_PORT": "3306",
-        "DB_USERNAME": "root",
-        "DB_PASSWORD": "123456",
-        "DB_DATABASE": "mcp_rss",
-        "RSS_UPDATE_INTERVAL": "1"
-      }
-    },
-    "web_content": {
-      "enabled": true,
-      "command": [".venv\\Scripts\\python.exe", "workspace\\mcp_servers\\web_content_mcp_server.py"],
-      "env": {
-        "PYTHONUTF8": "1"
-      }
-    },
-    "feed_bridge": {
-      "enabled": true,
-      "command": [".venv\\Scripts\\python.exe", "workspace\\mcp_servers\\feed_bridge_mcp_server.py"],
-      "env": {
-        "PYTHONUTF8": "1",
-        "WEB_FEEDS": "[{\"name\":\"python-insider\",\"url\":\"https://blog.python.org/rss.xml\"}]"
-      }
-    }
-  }
-}
-```
-
-当前实现是最小 stdio JSON-RPC MCP client，支持：
-
-- `initialize`
-- `tools/list`
-- `tools/call`
-
-启动失败只记录 warning，不会让 bot 崩溃。MCP 工具会注册进 `ToolRegistry`，source 为 `mcp:<server>`。
-
-DuckDuckGo Search 使用仓库内固定的 npm MCP 包 `@oevortex/ddg_search@1.2.2`，启动命令固定为 `node package\bin\cli.js`。它不需要 API key，但首次使用前需要先在 `package/` 目录执行一次 `npm install`，避免运行时 `npx` 冷启动。
-
-这里要区分两类能力：
-
-- `search` 负责发现候选链接。
-- builtin `web_fetch` 和 MCP `fetch_page` 负责读取单个 URL 的正文预览。
-
-RSS 示例使用第三方 `mcp_rss`，它依赖 OPML 文件和 MySQL。`python main.py init` 会创建 `workspace/rss_feeds.opml`。准备好 MySQL 后，把 `workspace/mcp_servers.json` 里的 `"rss"` 改成 `"enabled": true`，再执行 `/mcp_reload`。
-
-Telegram 命令：
-
-- `/mcp`：查看已连接 server 和工具数。
-- `/mcp_reload`：重新加载 MCP server。
-
-## 主动 Feed Source
-
-`workspace/proactive_sources.json` 示例：
-
-```json
-{
-  "sources": [
-    {
-      "server": "rss",
-      "channel": "content",
-      "poll_tool": null,
-      "get_tool": "get_content",
-      "get_args": {
-        "status": "normal",
-        "limit": 10
-      },
-      "ack_tool": null,
-      "enabled": false
-    },
-    {
-      "server": "feed_bridge",
-      "channel": "content",
-      "poll_tool": "poll_feeds",
-      "get_tool": "get_proactive_events",
-      "ack_tool": "ack_events",
-      "enabled": true
-    }
-  ]
-}
-```
-
-tick 流程：
+或：
 
 ```text
-tick
-  -> due reminders 优先
-  -> collect feed candidates
-  -> run drift preparation
-  -> optional fallback candidate
-  -> 统一预算 / 去重 / quiet hours / source cap 过滤
-  -> 统一排序，最多发送 1 条
-  -> ack、写审计和 trace
+加入表情包 可爱
 ```
 
-`/proactive_status` 可以查看最近 tick、内容数、发送数和 seen item 数。
+收录后的素材会进入本地目录，并维护 `manifest.json` 元数据。
 
-## Drift 空闲任务
+## MCP 与主动 Feed
 
-Drift 现在是后台 preparation layer，不再默认承担“主动发新闻”的职责。它会在后台整理记忆、准备 follow-up 草稿、维护内部观察笔记；如果某次结果被显式标记为 `shareable=true`，才会被提升为普通主动候选，并与 feed / fallback 一起进入统一排序。
+如果你启用 `feed_bridge`，项目可以把外部 RSS/Atom 内容转成主动候选。默认示例配置文件是：
 
-配置示例：
+- `workspace/mcp_servers.json`
+- `workspace/proactive_sources.json`
+- `workspace/rss_feeds.opml`
 
-```toml
-[proactive.loop]
-enabled = true
-tick_interval_seconds = 60
-target_chat_id = ""
+其中 `feed_bridge` 会暴露这些工具：
 
-[proactive.budget]
-daily_max = 6
-min_interval_minutes = 90
-quiet_hours_start = ""
-quiet_hours_end = ""
+- `poll_feeds`
+- `get_proactive_events`
+- `ack_events`
 
-[proactive.feed]
-enabled = true
-sources_path = "workspace/proactive_sources.json"
-daily_cap = 3
+`web_content` 会暴露：
 
-[proactive.drift]
-enabled = false
-tasks_path = "workspace/drift_tasks.json"
-output_dir = "workspace/drift_runs"
-run_cooldown_minutes = 180
-daily_run_cap = 3
-promotion_enabled = true
-daily_cap = 2
+- `fetch_page`
 
-[proactive.fallback]
-enabled = false
-probability = 0.03
-daily_cap = 2
-```
-
-`python main.py init` 会创建 `workspace/drift_tasks.json`，格式如下：
-
-```json
-{
-  "tasks": [
-    {
-      "id": "memory_review",
-      "title": "整理近期记忆线索",
-      "prompt": "阅读近期摘要、长期记忆和待提醒，输出一份后台整理笔记。默认不要直接打扰用户，只有内容高价值、高置信且适合马上说出口时，才在 candidate 元数据中把 shareable 设为 true。",
-      "enabled": true
-    }
-  ]
-}
-```
-
-运行结果会保存到 `workspace/drift_runs/`，并写入 SQLite 的 `drift_runs` 表。是否真正发给用户，不再由 drift 自己决定，而是由 `ProactiveLoop` 把它当成普通候选统一评估。
-
-drift 现在也会走工具循环。也就是说，后台任务可以通过 `tool_search` 解锁 MCP 工具，再调用 Brave Search 或 RSS 工具获取外部信息。
-
-Drift 也可以使用 skill：
-
-```toml
-[proactive.drift.skills]
-enabled = true
-workspace_dir = "workspace/drift/skills"
-include_builtin = true
-```
-
-开启后，drift 会优先扫描 `workspace/drift/skills/`，并可使用内置 skills 中标记 `metadata.chat_agent.drift=true` 的说明书；如果没有可用 drift skill，会回退到原来的 `workspace/drift_tasks.json`。
-
-## 常用命令
+## 常用 Telegram 命令
 
 - `/start`
 - `/help`
@@ -395,6 +336,8 @@ include_builtin = true
 
 ## 示例
 
+文本对话：
+
 ```text
 你好
 记住：我喜欢简洁回答
@@ -402,10 +345,16 @@ include_builtin = true
 1分钟后提醒我喝水
 ```
 
-也可以直接发送图片，并配 caption：
+图片理解：
 
 ```text
 帮我看看这张图里有什么
+```
+
+表情包收录：
+
+```text
+存成表情包：抱抱
 ```
 
 ## 测试
@@ -415,98 +364,36 @@ pytest
 python -m compileall chat_agent main.py tests
 ```
 
-测试不会调用真实 LLM、Telegram 或外部 MCP server。
+当前测试不会去调用真实的 LLM、Telegram Bot API 或外部 MCP server。
+
+## 运行产物
+
+默认运行后你会主要看到这些本地数据：
+
+- `workspace/agent.sqlite3`：业务主库，保存消息、记忆、提醒、主动候选等
+- `observe/observe.db`：观测库，保存 trace、MCP 调用日志、proactive tick 等
+- `logs/app.log`：应用日志
+- `workspace/attachments/`：下载的 Telegram 图片
+- `workspace/files/`：工具可访问的文件工作区
+- `workspace/memory/`：长期运行时整理出的 markdown 档案
 
 ## 常见问题
 
-- 主模型不支持图片：确认 `[llm.main].enable_vision = true`，并使用视觉模型。
-- API key 401：检查环境变量、base_url、模型供应商配置。
-- Telegram 文件下载失败：检查 bot token、网络和 `image_max_mb`。
-- MCP server 启动失败：看日志里的 warning，确认 command 路径和 env。
-- feed poll 空：确认 MCP server 暴露了 `poll_tool/get_tool`，并且 `proactive_sources.json` 配置正确。
-- 主动消息不发：检查 `proactive.loop.target_chat_id`、`proactive.budget.daily_max`、`proactive.budget.min_interval_minutes`、`seen_items` 去重和 source cap。
+- 启动时报 `Config error`
+  通常是 `config.toml` 缺字段，或 `${ENV_NAME}` 对应的环境变量未设置。
+- 图片无法理解
+  检查 `[llm.main].enable_vision = true`，并确认主模型本身支持视觉输入。
+- DuckDuckGo MCP 用不了
+  先进入 `package/` 执行一次 `npm install`。
+- 主动消息不发送
+  重点检查 `proactive.loop.target_chat_id`、预算配置、静默时段和 `presence.skip_when_busy`。
+- Chroma 检索无效
+  确认已启动 Chroma 服务；如果没有外部服务，切回 `provider = "sqlite_json"`。
 
-## 当前补充能力
+## 适合继续扩展的方向
 
-本版本进一步补齐了更接近长期运行个人智能体的几个基础能力：
-
-- 用户画像：`user_profiles` 表会保存用户名称、偏好、禁忌和回答风格等轻量画像；`ContextBuilder` 会把画像注入上下文。
-- 回答后异步记忆写入：普通回复发送前不会被记忆抽取阻塞；本轮提交后会启动后台任务，用规则抽取稳定偏好和事实。
-- 文件工具：`list_files`、`read_file`、`write_file` 只能访问 `[tools].file_workspace`，默认是 `workspace/files`，不能逃逸到项目其他目录。
-- 消息推送工具：`send_message` 允许模型在工具循环中向当前 chat 或 `proactive.loop.target_chat_id` 发送消息；默认需要通过 `tool_search` 解锁。
-- 独立观测库：新增 `[observe].database_path`，默认写到 `observe/observe.db`；消息 trace、MCP 工具日志和 proactive tick 会进入观测库，同时 proactive tick 也保留在主库供 `/status` 使用。
-
-配置示例：
-
-```toml
-[tools]
-file_workspace = "workspace/files"
-
-[observe]
-database_path = "observe/observe.db"
-```
-
-## Embedding 与向量记忆
-
-向量记忆分两个阶段实现：
-
-第一阶段已经可用：`provider = "sqlite_json"`。记忆仍保存在 SQLite 的 `memories` 表中，
-embedding 会写入 `memory_embeddings` 表，检索时会把 LIKE、query rewrite、HyDE 和向量相似度结果合并。
-这个阶段不需要部署外部向量数据库，适合个人助手早期使用。
-
-```toml
-[embedding]
-enabled = true
-provider = "sqlite_json"
-model = "text-embedding-v4"
-api_key = "${QWEN_API_KEY}"
-base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-timeout_seconds = 30
-dimension = 1024
-top_k = 5
-min_score = 0.2
-```
-
-第二阶段已经接入 Chroma：`provider = "chroma"`。记忆正文仍以 SQLite 为准，
-Chroma 只保存 `memory_id`、`chat_id` 和 embedding，用于高效向量相似度检索。
-如果你没有单独启动 Chroma server，请不要把 `provider` 改成 `chroma`；直接使用 `sqlite_json` 即可。
-
-先启动 Chroma server：
-
-```powershell
-chroma run --host localhost --port 8000
-```
-
-然后修改配置：
-
-```toml
-[embedding]
-enabled = true
-provider = "chroma"
-model = "text-embedding-v4"
-api_key = "${QWEN_API_KEY}"
-base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-timeout_seconds = 30
-dimension = 1024
-top_k = 5
-min_score = 0.2
-external_url = "http://localhost:8000"
-external_api_key = ""
-collection = "chat_agent_memories"
-```
-
-Chroma 依赖 `chromadb`。更新依赖后运行：
-
-```powershell
-pip install -e ".[dev]"
-```
-
-## 记忆持久化链路
-
-当前项目的记忆已经不是单一 SQLite 表，而是三层落盘：
-
-1. 原始对话层：`AgentLoop._commit()` 每轮都会把 `user` 和 `assistant` 两条消息写入 `session_messages`，这是后续整理长期记忆的原料。
-2. 语义记忆层：显式 `memorize`、轻量抽取和 consolidation 都会写入 `memories`；开启 embedding 后会同步写入 SQLite JSON 向量或 Chroma。
-3. 文本档案层：`workspace/memory/` 下维护 `HISTORY.md`、`PENDING.md`、`MEMORY.md`、`RECENT_CONTEXT.md`、`SELF.md`、`NOW.md`。
-
-整理流程是：回复结束后触发 post-turn consolidation，旧会话窗口会写入 `HISTORY.md` / `PENDING.md` / `memories`，成功后才推进 `last_consolidated` 检查点。后台 `MemoryOptimizerLoop` 会定期把 `PENDING.md` 合并进 `MEMORY.md`，并使用快照回滚避免合并失败时丢失 pending 内容。
+- 增加更多内置 skills 和 drift 专用 skills
+- 接更多 MCP server
+- 为主动消息增加更强的排序策略
+- 补充更细的记忆治理和清理工具
+- 为表情包系统增加管理命令和审核流程
