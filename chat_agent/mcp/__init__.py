@@ -1,0 +1,1 @@
+"""Minimal stdio MCP integration."""

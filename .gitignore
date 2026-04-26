@@ -1,0 +1,66 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Test / tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# IDE / OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local config / secrets
+config.toml
+.env
+.env.*
+
+# Logs and local observability data
+logs/
+observe/*.db
+
+# Local runtime databases and vector stores
+*.sqlite3
+*.sqlite3-shm
+*.sqlite3-wal
+chroma/
+
+# Python packaging artifacts
+build/
+dist/
+*.egg-info/
+
+# Node / package local dependencies
+package/node_modules/
+package/.smithery/
+
+# Generated documents / archives
+learn.docx
+*.tgz
+
+# Workspace runtime data
+workspace/agent.sqlite3
+workspace/test_mcp_check.sqlite3
+workspace/mcp_servers.json
+workspace/proactive_sources.json
+workspace/drift_tasks.json
+workspace/rss_feeds.opml
+workspace/attachments/
+workspace/drift_runs/
+workspace/memory/
+workspace/files/
+
+# Temporary local files
+*.log

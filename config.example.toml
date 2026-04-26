@@ -1,0 +1,142 @@
+[llm.main]
+model = "qwen-vl-plus"
+api_key = "${QWEN_API_KEY}"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+timeout_seconds = 60
+max_tokens = 4096
+enable_vision = true
+
+[llm.fast]
+model = "qwen-flash"
+api_key = "${QWEN_API_KEY}"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+timeout_seconds = 20
+max_tokens = 1024
+enable_vision = false
+
+[telegram]
+token = "${TELEGRAM_BOT_TOKEN}"
+allow_from = ["your_username"]
+unauthorized_reply = true
+download_images = true
+image_max_mb = 10
+
+[memory]
+enabled = true
+database_path = "workspace/agent.sqlite3"
+history_window = 20
+top_k = 5
+summary_enabled = true
+summary_after_messages = 40
+max_messages_per_chat = 500
+query_rewrite_enabled = true
+hyde_enabled = true
+
+[embedding]
+enabled = false
+provider = "sqlite_json" # sqlite_json 或 chroma
+model = "text-embedding-v4"
+api_key = "${QWEN_API_KEY}"
+base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+timeout_seconds = 30
+dimension = 1024
+top_k = 5
+min_score = 0.2
+external_url = "http://localhost:8000" # provider="chroma" 时使用
+external_api_key = ""
+collection = "chat_agent_memories"
+
+[tools]
+tool_calling_enabled = true
+max_iterations = 8
+tool_search_enabled = true
+web_fetch_timeout_seconds = 10
+file_workspace = "workspace/files"
+# Builtin tools in this project:
+# always visible: memorize, recall_memory, create_reminder, list_reminders, tool_search, list_memes
+# discoverable via tool_search: cancel_reminder, web_fetch, list_files, read_file
+# when skills.enabled=true: list_skills, read_skill are always visible; create_skill, update_skill stay hidden
+# hidden by default, can be exposed to the model here if you really want:
+# write_file, send_message, send_emoji, send_meme, create_skill, update_skill
+# MCP tools can also be listed here by registered name after load, e.g.:
+# duckduckgo_web_search, rss_get_content, web_content_fetch_page,
+# feed_bridge_poll_feeds, feed_bridge_get_proactive_events, feed_bridge_ack_events
+extra_model_tools = []
+
+[mcp]
+enabled = true
+config_path = "workspace/mcp_servers.json"
+# Current MCP servers found in this project/workspace:
+# duckduckgo, rss, web_content, feed_bridge
+allowed_servers = ["duckduckgo", "rss", "web_content", "feed_bridge"]
+# allowed_tools uses raw MCP names: <server>:<tool>
+# Confirmed tools currently used in this project:
+# duckduckgo:web-search
+# rss:get_content
+# web_content:fetch_page
+# feed_bridge:poll_feeds, feed_bridge:get_proactive_events, feed_bridge:ack_events
+allowed_tools = [
+  "duckduckgo:web-search",
+  "rss:get_content",
+  "web_content:fetch_page",
+  "feed_bridge:poll_feeds",
+  "feed_bridge:get_proactive_events",
+  "feed_bridge:ack_events",
+]
+
+[skills]
+enabled = true
+builtin_dir = "skills"
+workspace_dir = "workspace/skills"
+inject_catalog = true
+max_catalog_chars = 4000
+
+[proactive.loop]
+enabled = true
+tick_interval_seconds = 60
+target_chat_id = ""
+
+[proactive.budget]
+daily_max = 6
+min_interval_minutes = 90
+quiet_hours_start = ""
+quiet_hours_end = ""
+
+[proactive.fallback]
+enabled = false
+probability = 0.03
+daily_cap = 2
+
+[proactive.feed]
+enabled = true
+sources_path = "workspace/proactive_sources.json"
+daily_cap = 3
+
+[proactive.drift]
+enabled = false
+tasks_path = "workspace/drift_tasks.json"
+output_dir = "workspace/drift_runs"
+run_cooldown_minutes = 180
+daily_run_cap = 3
+promotion_enabled = true
+daily_cap = 2
+
+[proactive.drift.skills]
+enabled = true
+workspace_dir = "workspace/drift/skills"
+include_builtin = true
+
+[proactive.presence]
+active_window_minutes = 10
+skip_when_busy = true
+
+[scheduler]
+enabled = true
+max_due_per_tick = 50
+
+[logging]
+level = "INFO"
+file = "logs/app.log"
+
+[observe]
+database_path = "observe/observe.db"
