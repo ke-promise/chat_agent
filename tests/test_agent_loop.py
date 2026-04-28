@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -25,11 +26,19 @@ def _message(text: str) -> InboundMessage:
     return InboundMessage(channel="telegram", chat_id="chat-1", sender="user-1", content=text, metadata={"username": "alice"})
 
 
-def _loop(store: SQLiteStore) -> AgentLoop:
+def _loop(store: SQLiteStore, model_main: str = "", model_fast: str = "") -> AgentLoop:
     tools = build_default_registry(store)
     context = ContextBuilder(store, MemoryRetriever(store), tools)
     reasoner = Reasoner(FakeProvider(), tools)
-    return AgentLoop(store, context, reasoner, TraceRecorder(store), PresenceTracker(store))
+    return AgentLoop(
+        store,
+        context,
+        reasoner,
+        TraceRecorder(store),
+        PresenceTracker(store),
+        model_main=model_main,
+        model_fast=model_fast,
+    )
 
 
 @pytest.mark.asyncio
@@ -45,3 +54,19 @@ async def test_agent_loop_direct_memory_and_reminder(tmp_path: Path) -> None:
     assert "简洁的回答" in recalled.content
     assert "提醒你 喝水" in reminder.content
     assert await store.get_due_reminders() == []
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_records_model_names_in_trace(tmp_path: Path) -> None:
+    db_path = tmp_path / "agent.sqlite3"
+    store = SQLiteStore(db_path)
+    loop = _loop(store, model_main="main-model", model_fast="fast-model")
+
+    await loop.handle_message(_message("hello"))
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT model_main, model_fast FROM message_trace ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+
+    assert row == ("main-model", "fast-model")

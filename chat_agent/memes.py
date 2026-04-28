@@ -107,7 +107,7 @@ DEFAULT_SOURCE_POLICY: dict[str, dict[str, Any]] = {
 class MemeMatch:
     """一次表情包检索命中结果。
 
-    Attributes:
+    字段:
         path: 命中的本地文件路径。
         category: 命中的表情包分类。
         description: 命中素材的描述文本，通常来自 manifest。
@@ -127,7 +127,7 @@ class MemeMatch:
 class MemeRequest:
     """显式表情包请求解析结果。
 
-    Attributes:
+    字段:
         explicit: 当前消息是否明确表达了要表情包。
         query: 用户请求中的分类、情绪或关键词。
     """
@@ -140,7 +140,7 @@ class MemeRequest:
 class MemeDecision:
     """自动挂图决策结果。
 
-    Attributes:
+    字段:
         should_attach: 本轮是否应该自动附带表情包。
         reason: 做出该决策的原因标签。
         query: 最终用于检索表情包的查询词。
@@ -161,7 +161,7 @@ class MemeDecision:
 class MemeIngestResult:
     """表情包收录结果。
 
-    Attributes:
+    字段:
         status: 收录状态，例如 created、duplicate 或 invalid。
         match: 收录后对应的命中对象；失败时可能为空。
         reason: 附加原因说明，便于调试或向用户解释。

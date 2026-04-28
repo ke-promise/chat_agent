@@ -93,8 +93,8 @@ def setup_logging(config: "LoggingConfig | None" = None) -> None:
         handler.addFilter(SecretFilter())
         root.addHandler(handler)
 
-    # python-telegram-bot polls getUpdates through httpx. At INFO level httpx logs
-    # every polling request, which is noisy and can include Telegram bot tokens in URLs.
+    # python-telegram-bot 会通过 httpx 轮询 getUpdates；INFO 级别会打印每次轮询，
+    # 既吵也可能把 Telegram Bot token 写进 URL 日志，因此单独压低它的日志级别。
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     logging.getLogger("telegram").setLevel(logging.WARNING)

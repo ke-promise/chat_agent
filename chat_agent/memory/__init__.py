@@ -1,1 +1,1 @@
-"""SQLite-backed session, memory, and reminder storage."""
+"""基于 SQLite 的会话、记忆与提醒存储能力。"""

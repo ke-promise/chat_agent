@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 class OptimizerResult:
     """一次离线导出任务的结果。
 
-    Attributes:
+    字段:
         ran: 本次是否真的执行了导出。
         reason: 没有执行或提前返回时的原因。
         exported_chats: 已成功导出的会话数量。

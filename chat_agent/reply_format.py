@@ -39,7 +39,7 @@ def _normalize_spacing(text: str) -> str:
     """规范换行和空格，特别处理中文之间异常插入的空格。"""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
     text = re.sub(r"[ \t]+", " ", text)
-    # Fix accidental spaces inside common Chinese words caused by model tokenization.
+    # 修正模型分词偶尔在常见中文词内部插入空格的问题。
     replacements = {
         "提 质": "提质",
         "致 力": "致力",

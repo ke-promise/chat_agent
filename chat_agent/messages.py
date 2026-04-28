@@ -19,7 +19,7 @@ class Attachment:
     这个对象是 channel 层和 agent 层之间传递附件的统一格式，避免业务逻辑直接依赖
     Telegram 的 PhotoSize、File 等原始对象。
 
-    Attributes:
+    字段:
         kind: 附件类型。当前只区分 image 和 file；图片会进入多模态上下文，
             file 先作为未来扩展保留。
         file_id: Telegram 或其他 channel 提供的文件标识，用于日志、排查和后续重新下载。
@@ -45,7 +45,7 @@ class OutboundAttachment:
     1. `photo`：发送本地表情包图片、网络图片 URL 或 Telegram file_id。
     2. `sticker`：发送 Telegram 贴纸 file_id，或本地 `.webp/.tgs` 贴纸文件。
 
-    Attributes:
+    字段:
         kind: 出站媒体类型，目前支持 `photo` 和 `sticker`。
         local_path: 本地文件路径。优先级最高，适合工作区内的表情包图片。
         file_id: Telegram 侧已有的文件标识，可直接复用，无需重新上传。
@@ -68,7 +68,7 @@ class InboundMessage:
     ContextBuilder、Reasoner、MemoryStore 都不需要知道 Telegram SDK 的细节，后续即便
     支持其他输入来源，也只要继续生成 InboundMessage 即可。
 
-    Attributes:
+    字段:
         channel: 来源通道名。当前固定为 "telegram"，drift 内部任务会使用 "proactive"。
         chat_id: 会话标识。对 Telegram 来说是 chat.id 的字符串形式，用于隔离历史、
             记忆、提醒和 proactive target。
@@ -113,7 +113,7 @@ class InboundMessage:
     def username(self) -> str | None:
         """从 metadata 中读取 Telegram username。
 
-        Returns:
+        返回:
             如果 channel 填入了 username，则返回字符串；否则返回 None。
         """
         value = self.metadata.get("username")
@@ -126,7 +126,7 @@ class OutboundMessage:
 
     channel 层只负责把这个对象发送出去，不再关心 LLM、记忆、提醒等业务流程。
 
-    Attributes:
+    字段:
         channel: 目标通道名。当前为 "telegram"。
         chat_id: 目标会话 ID。
         content: 要发送的文本内容。纯文本消息直接发送；媒体消息则作为 caption 或后续补充文本。

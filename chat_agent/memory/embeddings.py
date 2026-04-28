@@ -38,7 +38,7 @@ class EmbeddingProvider:
     def __init__(self, model: str, api_key: str, base_url: str, timeout_seconds: float = 30) -> None:
         """初始化 OpenAI-compatible embedding 客户端。
 
-        Args:
+        参数:
             model: embedding 模型名，例如 text-embedding-v4。
             api_key: API key，来自配置或环境变量，不能写死在代码中。
             base_url: OpenAI-compatible 服务地址。

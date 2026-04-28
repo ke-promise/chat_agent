@@ -34,18 +34,18 @@ class MemoryRetriever:
         vector_top_k: int = 5,
         vector_min_score: float = 0.2,
     ) -> None:
-        """初始化 `MemoryRetriever` 实例。
+        """初始化长期记忆检索器。
 
         参数:
-            store: 初始化 `MemoryRetriever` 时需要的 `store` 参数。
-            enabled: 初始化 `MemoryRetriever` 时需要的 `enabled` 参数。
-            fast_provider: 初始化 `MemoryRetriever` 时需要的 `fast_provider` 参数。
-            query_rewrite_enabled: 初始化 `MemoryRetriever` 时需要的 `query_rewrite_enabled` 参数。
-            hyde_enabled: 初始化 `MemoryRetriever` 时需要的 `hyde_enabled` 参数。
-            embedding_provider: 初始化 `MemoryRetriever` 时需要的 `embedding_provider` 参数。
-            vector_store: 初始化 `MemoryRetriever` 时需要的 `vector_store` 参数。
-            vector_top_k: 初始化 `MemoryRetriever` 时需要的 `vector_top_k` 参数。
-            vector_min_score: 初始化 `MemoryRetriever` 时需要的 `vector_min_score` 参数。
+            store: 长期记忆和会话状态的 SQLite 存储。
+            enabled: 是否启用在线记忆召回。
+            fast_provider: 轻量模型，用于路由、query rewrite 和 HyDE。
+            query_rewrite_enabled: 是否启用检索查询改写。
+            hyde_enabled: 是否生成假想记忆辅助召回。
+            embedding_provider: 可选 embedding provider。
+            vector_store: 可选向量存储。
+            vector_top_k: 向量召回的参考数量。
+            vector_min_score: 向量命中的最低相似度。
         """
         self.store = store
         self.enabled = enabled
@@ -132,15 +132,15 @@ class MemoryRetriever:
         return result
 
     async def _vector_search(self, chat_id: str, query: str, top_k: int) -> list[dict[str, Any]]:
-        """处理`search`。
+        """对查询文本执行向量召回，并把命中回表成记忆条目。
 
         参数:
-            chat_id: 参与处理`search`的 `chat_id` 参数。
-            query: 参与处理`search`的 `query` 参数。
-            top_k: 参与处理`search`的 `top_k` 参数。
+            chat_id: 当前会话 ID。
+            query: 待向量化的查询文本。
+            top_k: 本次最多返回多少条候选。
 
         返回:
-            返回与本函数处理结果对应的数据。
+            带 `_vector_score` 的记忆条目列表；向量服务不可用时返回空列表。
         """
         if not self.embedding_provider or not self.vector_store:
             return []
@@ -163,13 +163,13 @@ class MemoryRetriever:
         return []
 
     async def _route(self, query: str) -> bool:
-        """路由相关逻辑。
+        """判断当前用户输入是否值得检索长期记忆。
 
         参数:
-            query: 参与路由相关逻辑的 `query` 参数。
+            query: 用户当前输入。
 
         返回:
-            返回与本函数处理结果对应的数据。
+            True 表示继续检索；False 表示跳过记忆召回。
         """
         if not self.fast_provider:
             return True
@@ -188,13 +188,13 @@ class MemoryRetriever:
             return True
 
     async def _rewrite(self, query: str) -> str:
-        """处理相关逻辑。
+        """把用户原话改写成更适合检索长期记忆的短查询。
 
         参数:
-            query: 参与处理相关逻辑的 `query` 参数。
+            query: 用户当前输入。
 
         返回:
-            返回与本函数处理结果对应的数据。
+            改写后的查询；失败或未启用时返回原查询。
         """
         if not self.query_rewrite_enabled or not self.fast_provider:
             return query
@@ -212,13 +212,13 @@ class MemoryRetriever:
         return query
 
     async def _hyde(self, query: str) -> str:
-        """处理相关逻辑。
+        """生成一条假想长期记忆，用于扩展召回查询。
 
         参数:
-            query: 参与处理相关逻辑的 `query` 参数。
+            query: 用户当前输入。
 
         返回:
-            返回与本函数处理结果对应的数据。
+            假想记忆文本；失败时返回空字符串。
         """
         if not self.fast_provider:
             return ""
@@ -237,13 +237,13 @@ class MemoryRetriever:
 
 
 def _unique_queries(queries: list[str]) -> list[str]:
-    """处理查询列表。
+    """去除空查询和重复查询，并保留原始顺序。
 
     参数:
-        queries: 参与处理查询列表的 `queries` 参数。
+        queries: 待合并的查询文本列表。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        去重后的非空查询列表。
     """
     result: list[str] = []
     seen: set[str] = set()
@@ -257,14 +257,14 @@ def _unique_queries(queries: list[str]) -> list[str]:
 
 
 def _keyword_match_score(item: dict[str, Any], query: str) -> float:
-    """处理`match`、`score`。
+    """计算查询词在记忆正文、标签和类型中的关键词覆盖率。
 
     参数:
-        item: 参与处理`match`、`score`的 `item` 参数。
-        query: 参与处理`match`、`score`的 `query` 参数。
+        item: 候选记忆条目。
+        query: 当前检索查询。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        0 到 1 之间的关键词匹配分数。
     """
     terms = [term.lower() for term in re_split_query(query) if term.strip()]
     if not terms:
@@ -282,13 +282,13 @@ def _keyword_match_score(item: dict[str, Any], query: str) -> float:
 
 
 def _recency_score(item: dict[str, Any]) -> float:
-    """处理`score`。
+    """根据记忆更新时间估算新鲜度分数。
 
     参数:
-        item: 参与处理`score`的 `item` 参数。
+        item: 候选记忆条目。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        0、0.5 或 1.0 的新鲜度分数。
     """
     stamp = item.get("updated_at") or item.get("last_used_at") or item.get("created_at")
     if not stamp:
@@ -306,16 +306,16 @@ def _recency_score(item: dict[str, Any]) -> float:
 
 
 def _match_reason(keyword_score: float, vector_score: float, source_kind: str, final_score: float) -> str:
-    """处理`reason`。
+    """根据重排特征生成便于 trace 展示的命中原因。
 
     参数:
-        keyword_score: 参与处理`reason`的 `keyword_score` 参数。
-        vector_score: 参与处理`reason`的 `vector_score` 参数。
-        source_kind: 参与处理`reason`的 `source_kind` 参数。
-        final_score: 参与处理`reason`的 `final_score` 参数。
+        keyword_score: 关键词匹配分。
+        vector_score: 向量相似度分。
+        source_kind: 记忆来源类型，例如 explicit 或 inferred。
+        final_score: 最终重排分。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        命中原因字符串。
     """
     if source_kind == "explicit" and final_score >= 0.35 and final_score < 0.45:
         return "explicit_low_threshold"
@@ -327,12 +327,12 @@ def _match_reason(keyword_score: float, vector_score: float, source_kind: str, f
 
 
 def _clip01(value: float) -> float:
-    """处理相关逻辑。
+    """把浮点数裁剪到 0 到 1 区间。
 
     参数:
-        value: 参与处理相关逻辑的 `value` 参数。
+        value: 原始浮点数。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        裁剪后的数值。
     """
     return max(0.0, min(value, 1.0))

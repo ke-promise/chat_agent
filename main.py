@@ -32,12 +32,31 @@ timeout_seconds = 20
 max_tokens = 1024
 enable_vision = false
 
+[channel]
+# telegram 或 qq
+type = "telegram"
+
 [telegram]
 token = "${TELEGRAM_BOT_TOKEN}"
 allow_from = ["your_username"]
 unauthorized_reply = true
 download_images = true
 image_max_mb = 10
+
+[qq]
+app_id = "${QQ_BOT_APP_ID}"
+app_secret = "${QQ_BOT_APP_SECRET}"
+sandbox = false
+host = "0.0.0.0"
+port = 8080
+path = "/qqbot"
+verify_signature = true
+# QQ openid / 群成员 openid 白名单；留空表示允许所有来源。
+allow_from = []
+unauthorized_reply = true
+download_images = false
+image_max_mb = 10
+max_text_chars = 1800
 
 [memory]
 enabled = true
@@ -70,13 +89,13 @@ max_iterations = 8
 tool_search_enabled = true
 web_fetch_timeout_seconds = 10
 file_workspace = "workspace/files"
-# Builtin tools in this project:
-# always visible: memorize, recall_memory, create_reminder, list_reminders, tool_search, list_memes
-# discoverable via tool_search: cancel_reminder, web_fetch, list_files, read_file
-# when skills.enabled=true: list_skills, read_skill are always visible; create_skill, update_skill stay hidden
-# hidden by default, can be exposed to the model here if you really want:
+# 本项目内置工具：
+# 默认可见：memorize、recall_memory、create_reminder、list_reminders、tool_search、list_memes
+# 可通过 tool_search 发现：cancel_reminder、web_fetch、list_files、read_file
+# 当 skills.enabled=true 时：list_skills、read_skill 默认可见；create_skill、update_skill 仍默认隐藏
+# 默认隐藏；确实需要时可以在这里暴露给模型：
 # write_file, send_message, send_emoji, send_meme, create_skill, update_skill
-# MCP tools can also be listed here by registered name after load, e.g.:
+# MCP 工具也可以在加载后按注册名写到这里，例如：
 # duckduckgo_web_search, rss_get_content, web_content_fetch_page,
 # feed_bridge_poll_feeds, feed_bridge_get_proactive_events, feed_bridge_ack_events
 extra_model_tools = []
@@ -84,11 +103,11 @@ extra_model_tools = []
 [mcp]
 enabled = true
 config_path = "workspace/mcp_servers.json"
-# Current MCP servers found in this project/workspace:
+# 当前项目/工作区中可用的 MCP server：
 # duckduckgo, rss, web_content, feed_bridge
 allowed_servers = ["duckduckgo", "rss", "web_content", "feed_bridge"]
-# allowed_tools uses raw MCP names: <server>:<tool>
-# Confirmed tools currently used in this project:
+# allowed_tools 使用原始 MCP 名称：<server>:<tool>
+# 当前项目确认会用到的工具：
 # duckduckgo:web-search
 # rss:get_content
 # web_content:fetch_page
@@ -322,7 +341,6 @@ async def run_bot(config: AppConfig) -> None:
     """
     try:
         from chat_agent.agent.provider import LLMProvider
-        from chat_agent.channels.telegram import TelegramChannel
         from chat_agent.context import ContextBuilder
         from chat_agent.loop import AgentLoop
         from chat_agent.mcp.registry import MCPRegistry
@@ -457,15 +475,30 @@ async def run_bot(config: AppConfig) -> None:
         vector_store=vector_store,
         consolidation_service=consolidation_service,
         meme_service=meme_service,
+        model_main=config.llm.main.model,
+        model_fast=config.llm.fast.model,
     )
 
-    channel = TelegramChannel(
-        config.telegram,
-        agent.handle_message,
-        store=store,
-        mcp_registry=mcp_registry,
-        skills_loader=skills_loader,
-    )
+    if config.channel == "qq":
+        from chat_agent.channels.qq import QQBotChannel
+
+        channel = QQBotChannel(
+            config.qq,
+            agent.handle_message,
+            store=store,
+            mcp_registry=mcp_registry,
+            skills_loader=skills_loader,
+        )
+    else:
+        from chat_agent.channels.telegram import TelegramChannel
+
+        channel = TelegramChannel(
+            config.telegram,
+            agent.handle_message,
+            store=store,
+            mcp_registry=mcp_registry,
+            skills_loader=skills_loader,
+        )
     register_message_push_tool(
         tools,
         channel,
@@ -544,7 +577,7 @@ def parse_args() -> argparse.Namespace:
     返回:
         返回 `argparse.Namespace`，包含待执行命令以及配置文件路径。
     """
-    parser = argparse.ArgumentParser(description="Telegram personal agent MVP")
+    parser = argparse.ArgumentParser(description="Personal agent MVP")
     parser.add_argument("command", nargs="?", choices=["init"], help="Initialize workspace and example config")
     parser.add_argument("--config", default="config.toml", help="Path to TOML config file")
     return parser.parse_args()
@@ -555,7 +588,7 @@ def main() -> None:
 
     行为:
         - 当命令为 `init` 时，初始化项目目录。
-        - 否则读取配置并启动 Telegram agent。
+        - 否则读取配置并启动 personal agent。
     """
     args = parse_args()
     if args.command == "init":
@@ -569,7 +602,7 @@ def main() -> None:
         raise SystemExit(f"Config error: {exc}") from exc
 
     setup_logging(config.logging)
-    logging.getLogger(__name__).info("Starting Telegram personal agent")
+    logging.getLogger(__name__).info("Starting personal agent channel=%s", config.channel)
     try:
         asyncio.run(run_bot(config))
     except KeyboardInterrupt:

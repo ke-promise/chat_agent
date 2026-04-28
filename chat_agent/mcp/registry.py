@@ -30,7 +30,7 @@ TOOL_NAME_PATTERN = re.compile(r"[^A-Za-z0-9_]")
 class MCPServer:
     """单个 MCP 服务器的运行时状态。
 
-    Attributes:
+    字段:
         name: 服务器名称，对应配置文件里的 key。
         command: 启动该 MCP server 的命令行数组。
         env: 启动进程时附加的环境变量。
@@ -68,14 +68,14 @@ class MCPRegistry:
         allowed_servers: list[str] | None = None,
         allowed_tools: list[str] | None = None,
     ) -> None:
-        """初始化 `MCPRegistry` 实例。
+        """初始化 MCP 注册表。
 
         参数:
-            config_path: 初始化 `MCPRegistry` 时需要的 `config_path` 参数。
-            tool_registry: 初始化 `MCPRegistry` 时需要的 `tool_registry` 参数。
-            store: 初始化 `MCPRegistry` 时需要的 `store` 参数。
-            allowed_servers: 初始化 `MCPRegistry` 时需要的 `allowed_servers` 参数。
-            allowed_tools: 初始化 `MCPRegistry` 时需要的 `allowed_tools` 参数。
+            config_path: MCP server 配置文件路径。
+            tool_registry: 需要写入 MCP 工具的运行时工具注册表。
+            store: 用于写入 MCP 调用日志的存储层。
+            allowed_servers: 可选 server 白名单；为空表示按配置加载全部启用 server。
+            allowed_tools: 可选原始工具白名单，格式为 `<server>:<tool>`。
         """
         self.config_path = Path(config_path)
         self.tool_registry = tool_registry
@@ -85,10 +85,7 @@ class MCPRegistry:
         self.allowed_tools = {item.strip() for item in (allowed_tools or []) if str(item).strip()}
 
     async def load(self) -> None:
-        """加载相关逻辑。
-
-        返回:
-            返回与本函数处理结果对应的数据。"""
+        """读取 MCP 配置、启动 server，并把发现的工具注册到 ToolRegistry。"""
         await self.shutdown()
         if not self.config_path.exists():
             logger.warning("MCP config not found: %s", self.config_path)
@@ -117,17 +114,11 @@ class MCPRegistry:
                 logger.warning("Failed to start MCP server %s: %s", name, exc)
 
     async def reload(self) -> None:
-        """处理相关逻辑。
-
-        返回:
-            返回与本函数处理结果对应的数据。"""
+        """重新加载 MCP 配置并重建所有 server 连接。"""
         await self.load()
 
     async def shutdown(self) -> None:
-        """处理相关逻辑。
-
-        返回:
-            返回与本函数处理结果对应的数据。"""
+        """停止所有 MCP server，并移除它们注册过的工具。"""
         old_names = list(self.servers.keys())
         for server in self.servers.values():
             await self._stop_server_process(server)
@@ -136,13 +127,10 @@ class MCPRegistry:
             self.tool_registry.unregister_source(f"mcp:{name}")
 
     async def _stop_server_process(self, server: MCPServer) -> None:
-        """停止`server`、`process`。
+        """停止单个 MCP server 进程并清理读写后台任务。
 
         参数:
-            server: 参与停止`server`、`process`的 `server` 参数。
-
-        返回:
-            返回与本函数处理结果对应的数据。
+            server: 要停止的 server 状态对象。
         """
         self._fail_pending(server, RuntimeError(f"MCP server {server.name} stopped"))
         tasks = [task for task in (server.stdout_reader_task, server.stderr_reader_task) if task]
@@ -163,22 +151,16 @@ class MCPRegistry:
         server.stderr_reader_task = None
 
     def status(self) -> str:
-        """处理相关逻辑。
-
-        返回:
-            返回与本函数处理结果对应的数据。"""
+        """返回当前 MCP server 连接状态的文本摘要。"""
         if not self.servers:
             return "未连接 MCP server。"
         return "\n".join(f"- {name}: tools={len(server.tools)}" for name, server in self.servers.items())
 
     async def _start_server(self, server: MCPServer) -> None:
-        """处理`server`。
+        """启动单个 MCP server，初始化协议并注册其工具。
 
         参数:
-            server: 参与处理`server`的 `server` 参数。
-
-        返回:
-            返回与本函数处理结果对应的数据。
+            server: 待启动的 server 状态对象。
         """
         server.process = await asyncio.create_subprocess_exec(
             *server.command,
@@ -437,15 +419,15 @@ def _expand_env(env: dict[str, str]) -> dict[str, str] | None:
 
 
 def _is_search_tool(server_name: str, tool_name: str, description: str) -> bool:
-    """处理`search`、工具。
+    """判断 MCP 工具是否属于默认可见的搜索类工具。
 
     参数:
-        server_name: 参与处理`search`、工具的 `server_name` 参数。
-        tool_name: 参与处理`search`、工具的 `tool_name` 参数。
-        description: 参与处理`search`、工具的 `description` 参数。
+        server_name: MCP server 名称。
+        tool_name: 原始 MCP 工具名。
+        description: 工具描述文本。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        True 表示该工具适合默认暴露给模型。
     """
     text = f"{server_name} {tool_name} {description}".lower()
     if server_name == "duckduckgo":
@@ -455,14 +437,14 @@ def _is_search_tool(server_name: str, tool_name: str, description: str) -> bool:
 
 
 def _infer_tool_risk(tool_name: str, description: str) -> str:
-    """推断工具、`risk`。
+    """根据工具名和描述推断工具风险等级。
 
     参数:
-        tool_name: 参与推断工具、`risk`的 `tool_name` 参数。
-        description: 参与推断工具、`risk`的 `description` 参数。
+        tool_name: 原始 MCP 工具名。
+        description: 工具描述文本。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        read 或 side_effect。
     """
     text = f"{tool_name} {description}".lower()
     write_keywords = ("write", "create", "update", "delete", "remove", "ack", "send", "post", "publish")
@@ -470,13 +452,13 @@ def _infer_tool_risk(tool_name: str, description: str) -> str:
 
 
 def _safe_tool_name(name: str) -> str:
-    """安全处理工具、`name`。
+    """把 MCP 原始工具名转换成合法的 Python/OpenAI 工具名。
 
     参数:
-        name: 参与安全处理工具、`name`的 `name` 参数。
+        name: 可能包含连字符、冒号或其他符号的原始名称。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        只包含字母、数字和下划线的安全名称。
     """
     safe = TOOL_NAME_PATTERN.sub("_", name)
     safe = re.sub(r"_+", "_", safe).strip("_")
@@ -488,15 +470,15 @@ def _safe_tool_name(name: str) -> str:
 
 
 def _normalize_mcp_schema(server_name: str, tool_name: str, schema: dict[str, Any]) -> dict[str, Any]:
-    """归一化`mcp`、参数 Schema。
+    """按项目约定修正 MCP 工具的参数 schema。
 
     参数:
-        server_name: 参与归一化`mcp`、参数 Schema的 `server_name` 参数。
-        tool_name: 参与归一化`mcp`、参数 Schema的 `tool_name` 参数。
-        schema: 参与归一化`mcp`、参数 Schema的 `schema` 参数。
+        server_name: MCP server 名称。
+        tool_name: 原始 MCP 工具名。
+        schema: server 返回的 inputSchema。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        可直接提供给模型的 JSON Schema。
     """
     if server_name == "duckduckgo" and tool_name in {"web-search", "web_search"}:
         properties = dict(schema.get("properties", {}))
@@ -520,15 +502,15 @@ def _normalize_mcp_schema(server_name: str, tool_name: str, schema: dict[str, An
 
 
 def _sanitize_mcp_args(server_name: str, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
-    """处理`mcp`、参数。
+    """在调用 MCP server 前清洗和限制工具参数。
 
     参数:
-        server_name: 参与处理`mcp`、参数的 `server_name` 参数。
-        tool_name: 参与处理`mcp`、参数的 `tool_name` 参数。
-        args: 参与处理`mcp`、参数的 `args` 参数。
+        server_name: MCP server 名称。
+        tool_name: 原始 MCP 工具名。
+        args: 模型传入的原始参数。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        清洗后的参数字典。
     """
     if server_name == "duckduckgo" and tool_name in {"web-search", "web_search"}:
         query = str(args.get("query", "")).strip()
@@ -542,7 +524,7 @@ def _sanitize_mcp_args(server_name: str, tool_name: str, args: dict[str, Any]) -
 
 
 def _classify_non_json_stdout(server_name: str, text: str):
-    """处理`non`、`json`、`stdout`。
+    """给 MCP stdout 中的非 JSON 文本选择合适日志级别。
 
     参数:
         server_name: 参与处理`non`、`json`、`stdout`的 `server_name` 参数。
@@ -556,7 +538,7 @@ def _classify_non_json_stdout(server_name: str, text: str):
 
 
 def _classify_stderr_log(server_name: str, text: str):
-    """处理`stderr`、`log`。
+    """给 MCP stderr 文本选择合适日志级别，过滤已知噪音。
 
     参数:
         server_name: 参与处理`stderr`、`log`的 `server_name` 参数。
@@ -576,15 +558,15 @@ def _classify_stderr_log(server_name: str, text: str):
 
 
 def _is_transient_search_failure(server_name: str, tool_name: str, error: str) -> bool:
-    """处理`transient`、`search`、`failure`。
+    """判断搜索工具失败是否属于可降级的临时故障。
 
     参数:
-        server_name: 参与处理`transient`、`search`、`failure`的 `server_name` 参数。
-        tool_name: 参与处理`transient`、`search`、`failure`的 `tool_name` 参数。
-        error: 参与处理`transient`、`search`、`failure`的 `error` 参数。
+        server_name: MCP server 名称。
+        tool_name: 原始 MCP 工具名。
+        error: 捕获到的错误文本。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        True 表示可返回 degraded 空搜索结果，而不是直接中断工具循环。
     """
     if _tool_kind(server_name, tool_name) != "search":
         return False
@@ -603,7 +585,7 @@ def _is_transient_search_failure(server_name: str, tool_name: str, error: str) -
 
 
 def _build_degraded_search_result(server_name: str, args: dict[str, Any], error: str) -> dict[str, Any]:
-    """构建`degraded`、`search`、结果。
+    """构建搜索后端临时不可用时的降级结果。
 
     参数:
         server_name: 参与构建`degraded`、`search`、结果的 `server_name` 参数。
@@ -624,7 +606,7 @@ def _build_degraded_search_result(server_name: str, args: dict[str, Any], error:
 
 
 def _normalize_mcp_result(server_name: str, tool_name: str, args: dict[str, Any], result: Any) -> dict[str, Any]:
-    """归一化`mcp`、结果。
+    """按工具类型把 MCP 返回值归一化成项目内部结构。
 
     参数:
         server_name: 参与归一化`mcp`、结果的 `server_name` 参数。
@@ -646,7 +628,7 @@ def _normalize_mcp_result(server_name: str, tool_name: str, args: dict[str, Any]
 
 
 def _tool_kind(server_name: str, tool_name: str) -> str:
-    """处理`kind`。
+    """判断 MCP 工具的业务类型：搜索、网页抓取、feed 或普通工具。
 
     参数:
         server_name: 参与处理`kind`的 `server_name` 参数。

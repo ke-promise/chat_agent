@@ -26,7 +26,7 @@ TOOL_CALL_RE = re.compile(r"<tool_call\s+name=[\"'](?P<name>[^\"']+)[\"']\s*>(?P
 class ReasonerResult:
     """一次推理执行的标准化输出。
 
-    Attributes:
+    字段:
         reply: 最终要返回给用户的文本回复。
         tools_used: 本轮实际调用过的内置工具名称列表。
         mcp_tools_used: 本轮实际调用过的 MCP 工具名称列表。
@@ -42,7 +42,7 @@ class ReasonerResult:
 class ParsedToolCall:
     """从模型输出中解析出的单条工具调用。
 
-    Attributes:
+    字段:
         name: 工具名称。
         args: 解析后的 JSON 参数字典。
         raw: 原始 `<tool_call>` 文本片段。
@@ -67,13 +67,13 @@ class Reasoner:
         max_iterations: int = 5,
         tool_loop_enabled: bool = True,
     ) -> None:
-        """初始化 `Reasoner` 实例。
+        """初始化推理器。
 
         参数:
-            provider: 初始化 `Reasoner` 时需要的 `provider` 参数。
-            tools: 初始化 `Reasoner` 时需要的 `tools` 参数。
-            max_iterations: 初始化 `Reasoner` 时需要的 `max_iterations` 参数。
-            tool_loop_enabled: 初始化 `Reasoner` 时需要的 `tool_loop_enabled` 参数。
+            provider: 主模型调用封装。
+            tools: 可供模型发现和执行的工具注册表。
+            max_iterations: 单轮推理最多允许多少次模型/工具往返。
+            tool_loop_enabled: 是否启用工具循环；关闭时只做一次普通模型回复。
         """
         self.provider = provider
         self.tools = tools
@@ -81,17 +81,17 @@ class Reasoner:
         self.tool_loop_enabled = tool_loop_enabled
 
     async def run(self, bundle: ContextBundle, inbound: InboundMessage) -> ReasonerResult:
-        """执行相关逻辑。
+        """执行一轮模型推理，并在需要时驱动多轮工具调用。
 
         参数:
-            bundle: 参与执行相关逻辑的 `bundle` 参数。
-            inbound: 参与执行相关逻辑的 `inbound` 参数。
+            bundle: ContextBuilder 已拼装好的模型上下文。
+            inbound: 当前入站消息，工具执行时会作为 ToolContext 的来源消息。
 
         返回:
-            返回与本函数处理结果对应的数据。
+            标准化 ReasonerResult，包含最终回复、工具使用记录和可能的错误信息。
         """
         if inbound.attachments and not self.provider.config.enable_vision:
-            return ReasonerResult(reply="当前主模型不支持图片理解，请换用 enable_vision=true 的视觉模型。")
+            return ReasonerResult(reply="我看见你发了图片，但当前主模型还没开图片理解。把 enable_vision=true 的视觉模型换上后，我就能认真看图啦。")
 
         messages = list(bundle.messages)
         tools_used: list[str] = []
@@ -99,9 +99,14 @@ class Reasoner:
         repeated: dict[tuple[str, str], int] = {}
         last_content = ""
         session_tool_names: set[str] = set()
+        disabled_tool_names: set[str] = set()
 
         for _ in range(max(1, self.max_iterations)):
-            visible_names = self.tools.resolve_visible_names(session_tool_names)
+            visible_names = [
+                name
+                for name in self.tools.resolve_visible_names(session_tool_names)
+                if name not in disabled_tool_names
+            ]
             schemas = self.tools.get_schema(visible_names) if self.tool_loop_enabled else None
             if schemas:
                 logger.info("Visible tools for LLM: %s", ", ".join(visible_names))
@@ -119,44 +124,63 @@ class Reasoner:
                 return ReasonerResult(reply=strip_tool_calls(content), tools_used=tools_used, mcp_tools_used=mcp_tools_used)
 
             if result.tool_calls:
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": content or None,
-                        "tool_calls": [
-                            {
-                                "id": call["id"],
-                                "type": "function",
-                                "function": {
-                                    "name": call["name"],
-                                    "arguments": call.get("raw_arguments", json.dumps(call.get("arguments", {}), ensure_ascii=False)),
-                                },
-                            }
-                            for call in result.tool_calls
-                        ],
-                    }
-                )
+                assistant_message = {
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": [
+                        {
+                            "id": call["id"],
+                            "type": "function",
+                            "function": {
+                                "name": call["name"],
+                                "arguments": call.get("raw_arguments", json.dumps(call.get("arguments", {}), ensure_ascii=False)),
+                            },
+                        }
+                        for call in result.tool_calls
+                    ],
+                }
+                if result.reasoning_content is not None:
+                    assistant_message["reasoning_content"] = result.reasoning_content
+                messages.append(assistant_message)
             else:
-                messages.append({"role": "assistant", "content": content})
+                assistant_message = {"role": "assistant", "content": content}
+                if result.reasoning_content is not None:
+                    assistant_message["reasoning_content"] = result.reasoning_content
+                messages.append(assistant_message)
 
             for call in calls:
                 key = (call.name, json.dumps(call.args, sort_keys=True, ensure_ascii=False))
                 repeated[key] = repeated.get(key, 0) + 1
                 if repeated[key] > 2:
                     logger.warning("Repeated tool call terminated: %s", call.name)
-                    return ReasonerResult(reply="工具调用重复过多，我先停止这次操作。", tools_used=tools_used, mcp_tools_used=mcp_tools_used)
+                    return ReasonerResult(reply="这个工具我绕了太多圈，先停一下，免得把你也绕晕。我们换个问法或稍后再试。", tools_used=tools_used, mcp_tools_used=mcp_tools_used)
 
                 if call.parse_error:
                     tool_result = f"工具参数 JSON 解析失败：{call.parse_error}。请修正后重试。"
                 else:
-                    if call.name == "tool_search":
+                    if call.name in disabled_tool_names:
+                        tool_result = (
+                            f"工具 {call.name} 本轮已因临时故障停用。"
+                            "请不要继续调用它；如果还有其他可见工具可以尝试，否则请基于已有信息给出有限回复。"
+                        )
+                    elif call.name == "tool_search":
                         query = str(call.args.get("query", "")).strip()
                         session_tool_names.update(tool.name for tool in self.tools.search(query, exposures={"discoverable"}))
-                    tool_result = await self.tools.execute(call.name, call.args, inbound)
+                        tool_result = await self.tools.execute(call.name, call.args, inbound)
+                    else:
+                        tool_result = await self.tools.execute(call.name, call.args, inbound)
+
                     tools_used.append(call.name)
                     tool = self.tools.get_tool(call.name)
                     if tool and tool.source.startswith("mcp:"):
                         mcp_tools_used.append(call.name)
+                    if _is_degraded_search_result(tool_result):
+                        disabled_tool_names.add(call.name)
+                        tool_result = (
+                            f"{tool_result}\n\n"
+                            f"注意：工具 {call.name} 的搜索后端本轮临时不可用，已经停用。"
+                            "请不要换关键词重复调用它；如果没有其他搜索工具，请直接说明实时搜索结果暂时不可用。"
+                        )
 
                 if result.tool_calls and call.raw:
                     messages.append({"role": "tool", "tool_call_id": call.raw, "content": tool_result})
@@ -167,14 +191,14 @@ class Reasoner:
         return ReasonerResult(reply=final_reply, tools_used=tools_used, mcp_tools_used=mcp_tools_used)
 
     async def _finalize_without_tools(self, messages: list[dict[str, Any]], last_content: str) -> str:
-        """处理`without`、工具集合。
+        """在工具循环达到上限后，要求模型停止调用工具并生成最终回复。
 
         参数:
-            messages: 参与处理`without`、工具集合的 `messages` 参数。
-            last_content: 参与处理`without`、工具集合的 `last_content` 参数。
+            messages: 已包含历史工具结果的消息列表。
+            last_content: 最后一次模型文本输出，用于最终兜底。
 
         返回:
-            返回与本函数处理结果对应的数据。
+            清理过工具标签的最终自然语言回复。
         """
         messages = list(messages)
         messages.append(
@@ -194,13 +218,13 @@ class Reasoner:
 
 
 def parse_tool_calls(text: str) -> list[ParsedToolCall]:
-    """解析工具、`calls`。
+    """从文本协议中解析 `<tool_call>` 工具调用。
 
     参数:
-        text: 参与解析工具、`calls`的 `text` 参数。
+        text: 模型返回的原始文本。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        解析出的工具调用列表；JSON 参数错误会保留在 parse_error 中。
     """
     calls: list[ParsedToolCall] = []
     for match in TOOL_CALL_RE.finditer(text):
@@ -217,12 +241,21 @@ def parse_tool_calls(text: str) -> list[ParsedToolCall]:
 
 
 def strip_tool_calls(text: str) -> str:
-    """清理工具、`calls`。
+    """移除文本回复中残留的 `<tool_call>` 标签。
 
     参数:
-        text: 参与清理工具、`calls`的 `text` 参数。
+        text: 原始模型回复。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        适合展示给用户的纯文本。
     """
     return TOOL_CALL_RE.sub("", text).strip()
+
+
+def _is_degraded_search_result(text: str) -> bool:
+    """判断工具结果是否表示搜索后端已降级为临时空结果。"""
+    try:
+        payload = json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return isinstance(payload, dict) and payload.get("degraded") is True and isinstance(payload.get("results"), list)

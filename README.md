@@ -1,10 +1,10 @@
-# Telegram 个人智能体
+# 个人智能体
 
-一个专注 Telegram 单通道的个人智能体项目，围绕 OpenAI-compatible LLM、长期记忆、提醒、MCP 工具、主动消息和技能说明书构建。它不做多平台抽象，重点是把“陪伴型个人助手”这条链路在本地跑通，并且尽量保持结构清晰、可扩展。
+一个支持 Telegram 与 QQ 官方 Bot 渠道的个人智能体项目，围绕 OpenAI-compatible LLM、长期记忆、提醒、MCP 工具、主动消息和技能说明书构建。重点是把“陪伴型个人助手”这条链路在本地跑通，并且尽量保持结构清晰、可扩展。
 
 ## 项目特点
 
-- Telegram-only，入口简单，部署和排障成本低。
+- 可选择 Telegram long polling 或 QQ 官方 Bot Webhook 渠道。
 - 支持文本对话和图片输入，主模型可直接处理多模态消息。
 - 同时维护会话历史、长期记忆、用户画像、摘要和文本档案。
 - 内置工具循环，支持 memory、reminder、网页抓取、文件读写、表情包等能力。
@@ -16,7 +16,7 @@
 ## 当前能力
 
 - 被动对话
-  处理 Telegram 文本、caption 和图片消息，支持白名单用户名控制。
+  处理 Telegram/QQ 文本和图片消息，支持白名单控制。
 - 长期记忆
   支持显式“记住：...”、自然语言偏好抽取、候选记忆晋升、记忆纠正和回忆查询。
 - 提醒系统
@@ -37,7 +37,7 @@
 ```text
 .
 ├─ chat_agent/                 核心 Python 代码
-│  ├─ channels/                Telegram 通道
+│  ├─ channels/                Telegram / QQ 通道
 │  ├─ memory/                  记忆、摘要、向量检索、文本档案
 │  ├─ mcp/                     MCP client/registry
 │  ├─ proactive/               主动消息、feed、drift
@@ -100,6 +100,9 @@ Copy-Item config.example.toml config.toml
 ```powershell
 $env:QWEN_API_KEY="your-api-key"
 $env:TELEGRAM_BOT_TOKEN="your-telegram-bot-token"
+# 使用 QQ 官方 Bot 时改用：
+$env:QQ_BOT_APP_ID="your-qq-bot-app-id"
+$env:QQ_BOT_APP_SECRET="your-qq-bot-app-secret"
 ```
 
 ### 4. 修改 `config.toml`
@@ -108,7 +111,9 @@ $env:TELEGRAM_BOT_TOKEN="your-telegram-bot-token"
 
 - `[llm.main]`：主对话模型，负责正常回复、图片理解、最终工具推理。
 - `[llm.fast]`：轻量模型，负责 query rewrite、HyDE、主动消息改写和 tie-break。
-- `[telegram]`：填好 bot token、允许访问的用户名白名单 `allow_from`。
+- `[channel]`：`type = "telegram"` 或 `type = "qq"`。
+- `[telegram]`：使用 Telegram 时填好 bot token、允许访问的用户名白名单 `allow_from`。
+- `[qq]`：使用 QQ 官方 Bot 时填好 `app_id`、`app_secret`、Webhook 监听地址和白名单。
 - `[memory]`：主业务 SQLite 默认是 `workspace/agent.sqlite3`。
 - `[observe]`：观测库默认是 `observe/observe.db`。
 
@@ -144,6 +149,17 @@ python main.py --config path\to\config.toml
 - `image_max_mb`
 
 当 `download_images = true` 时，收到的图片会下载到 `workspace/attachments/`，并作为附件注入上下文。
+
+### QQ 官方 Bot
+
+把 `[channel].type` 改成 `"qq"` 后，程序会启动本地 Webhook 服务：
+
+- `app_id` / `app_secret`：QQ 开放平台机器人凭证。
+- `host` / `port` / `path`：Webhook 监听地址，例如 `http://your-domain:8080/qqbot`。
+- `verify_signature`：默认校验 QQ 回调签名。
+- `allow_from`：QQ openid 白名单，留空表示允许所有来源。
+
+主动推送的 `proactive.loop.target_chat_id` 需要带场景前缀，例如 `c2c:<user_openid>`、`group:<group_openid>`、`channel:<channel_id>` 或 `dm:<guild_id>`。
 
 ### 记忆与向量检索
 

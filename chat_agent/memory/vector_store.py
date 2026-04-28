@@ -46,7 +46,7 @@ class SQLiteJsonVectorStore:
     def __init__(self, store: SQLiteStore) -> None:
         """初始化 SQLite JSON 向量存储。
 
-        Args:
+        参数:
             store: 主 SQLiteStore，用于读写 memory_embeddings 表。
         """
         self.store = store
@@ -124,7 +124,7 @@ class ChromaVectorStore:
     def __init__(self, config: EmbeddingConfig, store: SQLiteStore) -> None:
         """初始化 Chroma 向量存储。
 
-        Args:
+        参数:
             config: embedding/vector_store 配置，包含 Chroma URL、collection 和密钥。
             store: 主 SQLiteStore，用于根据 Chroma 返回的 memory_id 回表读取正文。
         """

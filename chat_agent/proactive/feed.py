@@ -36,7 +36,7 @@ def _compact_summary(text: str, limit: int = 120) -> str:
 class FeedSource:
     """一个主动 feed 数据源的配置项。
 
-    Attributes:
+    字段:
         server: 提供该 feed 的 MCP server 名称。
         channel: feed 所属逻辑频道，用于筛选事件。
         poll_tool: 主动触发抓取的工具名；不需要轮询时可为空。

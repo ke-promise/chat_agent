@@ -272,7 +272,7 @@ class TelegramChannel:
     ) -> None:
         """发送单个媒体附件。
 
-        Args:
+        参数:
             chat_id: Telegram 目标会话 ID。
             attachment: 要发送的媒体附件描述。
             reply_to_message_id: 可选回复消息 ID。
@@ -335,7 +335,7 @@ class TelegramChannel:
             return
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
-            text="你好呀，我是你的陪伴型 Telegram 小助手。文字、图片、提醒、记忆都可以交给我，轻轻喊一声就到。",
+            text="你好呀，我在这儿。文字、图片、提醒、记忆都可以交给我，轻轻喊一声就到。",
         )
 
     async def _on_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -345,7 +345,7 @@ class TelegramChannel:
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=(
-                "我会这些小把戏：/start /help /status /memory /forget <id> /mcp /mcp_reload /skills /proactive_status\n"
+                "我会这些小把戏，想用哪个轻轻喊我就行：/start /help /status /memory /forget <id> /mcp /mcp_reload /skills /proactive_status\n"
                 "记忆：记住：我喜欢简洁的回答\n"
                 "回忆：你记得我喜欢什么？\n"
                 "提醒：1分钟后提醒我喝水"
@@ -364,13 +364,13 @@ class TelegramChannel:
         memory_count = await self.store.count_memories(chat_id) if self.store else 0
         reminder_count = await self.store.count_pending_reminders(chat_id) if self.store else 0
         tick = await self.store.get_last_proactive_tick() if self.store else None
-        tick_text = "无" if not tick else f"{tick['tick_at']} action={tick['action']} reason={tick['skip_reason']}"
-        mcp_text = self.mcp_registry.status() if self.mcp_registry else "MCP 未启用。"
+        tick_text = "暂时还没有" if not tick else f"{tick['tick_at']} action={tick['action']} reason={tick['skip_reason']}"
+        mcp_text = self.mcp_registry.status() if self.mcp_registry else "MCP 还没启用。"
         skills_count = len(self.skills_loader.list_skills(filter_unavailable=False)) if self.skills_loader else 0
         await context.bot.send_message(
             chat_id=chat_id,
             text=(
-                f"运行中。\nchat_id: {chat_id}\n"
+                f"我在好好运行中。\nchat_id: {chat_id}\n"
                 f"记忆数量: {memory_count}\n待提醒: {reminder_count}\n"
                 f"最近 proactive tick: {tick_text}\nMCP: {mcp_text}\nskills: {skills_count}"
             ),
@@ -382,7 +382,7 @@ class TelegramChannel:
             return
         chat_id = str(update.effective_chat.id)
         memories = await self.store.list_recent_memories(chat_id, limit=10) if self.store else []
-        text = "当前没有长期记忆。" if not memories else "\n".join(
+        text = "当前还没有长期记忆，我的小本本这页还是空的。" if not memories else "\n".join(
             f"#{item['id']} [{item['type']}] {item['content']}" for item in memories
         )
         await context.bot.send_message(chat_id=chat_id, text=text)
@@ -393,21 +393,21 @@ class TelegramChannel:
             return
         chat_id = str(update.effective_chat.id)
         if not context.args:
-            await context.bot.send_message(chat_id=chat_id, text="用法：/forget <memory_id>")
+            await context.bot.send_message(chat_id=chat_id, text="用法是 /forget <memory_id>，把编号给我就能轻轻擦掉那条记忆。")
             return
         try:
             memory_id = int(context.args[0])
         except ValueError:
-            await context.bot.send_message(chat_id=chat_id, text="memory_id 必须是数字。")
+            await context.bot.send_message(chat_id=chat_id, text="memory_id 要是数字哦，我才知道该擦掉哪一条。")
             return
         ok = await self.store.delete_memory(chat_id, memory_id) if self.store else False
-        await context.bot.send_message(chat_id=chat_id, text=f"已删除记忆 #{memory_id}。" if ok else "没有找到这条记忆。")
+        await context.bot.send_message(chat_id=chat_id, text=f"好呀，已轻轻删掉记忆 #{memory_id}。" if ok else "我翻了翻小本本，没有找到这条记忆。")
 
     async def _on_mcp(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """处理 /mcp 命令，展示已连接 MCP server 和工具数量。"""
         if not await self._ensure_allowed(update, context):
             return
-        text = self.mcp_registry.status() if self.mcp_registry else "MCP 未启用。"
+        text = self.mcp_registry.status() if self.mcp_registry else "MCP 还没启用。"
         await context.bot.send_message(chat_id=update.effective_chat.id, text=text)
 
     async def _on_mcp_reload(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -415,21 +415,21 @@ class TelegramChannel:
         if not await self._ensure_allowed(update, context):
             return
         if not self.mcp_registry:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="MCP 未启用。")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="MCP 还没启用，暂时没法重载它。")
             return
         await self.mcp_registry.reload()
-        await context.bot.send_message(chat_id=update.effective_chat.id, text="MCP 已重新加载。\n" + self.mcp_registry.status())
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="好啦，MCP 已重新加载。\n" + self.mcp_registry.status())
 
     async def _on_skills(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """处理 /skills 命令，列出内置与 workspace 中可见的技能说明书。"""
         if not await self._ensure_allowed(update, context):
             return
         if not self.skills_loader:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="skills 未启用。")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="skills 还没启用，这个小抽屉暂时打不开。")
             return
         skills = self.skills_loader.list_skills(filter_unavailable=False)
         if not skills:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="当前没有 skill。")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="当前还没有 skill，小工具箱暂时空空的。")
             return
         lines = []
         for item in skills[:30]:
@@ -445,7 +445,7 @@ class TelegramChannel:
             return
         tick = await self.store.get_last_proactive_tick() if self.store else None
         seen = await self.store.count_seen_items() if self.store else 0
-        text = "暂无 proactive tick。" if not tick else (
+        text = "暂时还没有 proactive tick，我的小巡逻还没留下记录。" if not tick else (
             f"最近 tick: {tick['tick_at']}\n"
             f"action={tick['action']} reason={tick['skip_reason']}\n"
             f"reminders_due={tick['reminders_due']} content_count={tick['content_count']} sent_count={tick['sent_count']}\n"
@@ -498,7 +498,7 @@ class TelegramChannel:
         )
 
         if update.message.photo and not attachments:
-            await context.bot.send_message(chat_id=update.effective_chat.id, text="图片过大或下载失败，暂时无法处理。")
+            await context.bot.send_message(chat_id=update.effective_chat.id, text="这张图有点难拿到，可能太大或下载失败了。你换一张小一点的试试？")
             return
 
         try:
@@ -506,7 +506,7 @@ class TelegramChannel:
             outbound = await self.handler(inbound)
         except Exception:
             logger.exception("Telegram message handling failed")
-            outbound = OutboundMessage(channel="telegram", chat_id=inbound.chat_id, content="处理这条消息时出了点问题，请稍后再试。")
+            outbound = OutboundMessage(channel="telegram", chat_id=inbound.chat_id, content="刚刚处理这条消息时绊了一下，我缓缓再陪你试。")
         await self.send(outbound)
 
     async def _build_attachments(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> list[Attachment]:
@@ -569,7 +569,7 @@ class TelegramChannel:
         logger.warning("Rejected unauthorized Telegram user username=%s user_id=%s", username, update.effective_user.id)
         if self.config.unauthorized_reply:
             try:
-                await context.bot.send_message(chat_id=update.effective_chat.id, text="你没有权限使用这个 bot。")
+                await context.bot.send_message(chat_id=update.effective_chat.id, text="这只小助手暂时还不认识你，先不能放你进来哦。")
             except Exception:
                 logger.exception("Failed to send unauthorized reply")
         return False

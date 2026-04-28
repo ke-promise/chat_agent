@@ -1,11 +1,13 @@
 [project]
 name = "telegram-personal-agent"
 version = "0.1.0"
-description = "Telegram-only personal agent MVP with SQLite memory and reminders."
+description = "Personal agent MVP with Telegram and QQ official bot channels."
 requires-python = ">=3.11"
 dependencies = [
+    "aiohttp>=3.9",
     "chromadb>=0.5",
     "openai>=1.0.0",
+    "PyNaCl>=1.5",
     "python-telegram-bot>=21.0",
 ]
 

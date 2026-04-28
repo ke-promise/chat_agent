@@ -67,6 +67,7 @@ class ProactiveLoop:
         """
         self.store = store
         self.channel = channel
+        self.channel_name = str(getattr(channel, "name", "telegram"))
         self.enabled = enabled
         self.tick_interval_seconds = tick_interval_seconds
         self.max_due_per_tick = max_due_per_tick
@@ -132,6 +133,8 @@ class ProactiveLoop:
             candidates = list(feed_candidates)
             if drift_result and drift_result.candidate:
                 candidates.append(drift_result.candidate)
+            candidates.extend(await self._collect_deferred_candidates())
+            candidates = self._dedupe_candidates(candidates)
             if not candidates:
                 fallback_candidate = await self._build_fallback_candidate()
                 if fallback_candidate:
@@ -143,6 +146,11 @@ class ProactiveLoop:
 
             sent = await self._deliver_best_candidate(candidates)
             if not sent:
+                fallback_candidate = await self._build_fallback_candidate()
+                if fallback_candidate:
+                    fallback_sent = await self._deliver_best_candidate([fallback_candidate])
+                    if fallback_sent:
+                        return
                 await self._add_tick_log("skip", "no_deliverable_candidate", 0, None, content_count=len(candidates))
         except Exception as exc:
             logger.exception("Proactive tick failed")
@@ -155,10 +163,10 @@ class ProactiveLoop:
             if await self._skip_for_presence(reminder["chat_id"]):
                 await self._add_tick_log("skip", "busy", len(reminders), None)
                 continue
-            text = f"叮咚，提醒时间到啦：{reminder['content']}"
+            text = f"叮咚，小提醒到啦：{reminder['content']}"
             await self.channel.send(
                 self._decorate_outbound(
-                    OutboundMessage(channel="telegram", chat_id=reminder["chat_id"], content=text),
+                    OutboundMessage(channel=self.channel_name, chat_id=reminder["chat_id"], content=text),
                     source="reminder",
                 )
             )
@@ -200,6 +208,51 @@ class ProactiveLoop:
         if not self.drift_config.enabled or not self.drift_manager:
             return None
         return await self.drift_manager.run_once()
+
+    async def _collect_deferred_candidates(self) -> list[ProactiveCandidate]:
+        """Load previously delayed drift candidates back into the current ranking."""
+        if not self.drift_config.enabled:
+            return []
+        rows = await self.store.list_deferred_proactive_candidates(
+            self.target_chat_id,
+            source_types=["drift"],
+            drop_reasons=["budget", "busy", "quiet_hours"],
+            limit=5,
+        )
+        candidates: list[ProactiveCandidate] = []
+        for row in rows:
+            candidates.append(
+                ProactiveCandidate(
+                    candidate_id=str(row.get("candidate_id") or ""),
+                    source_type=str(row.get("source_type") or "drift"),
+                    title=str(row.get("title") or ""),
+                    body=str(row.get("body") or ""),
+                    url=str(row.get("url") or ""),
+                    confidence=float(row.get("confidence") or 0.0),
+                    novelty=float(row.get("novelty") or 0.0),
+                    user_fit=float(row.get("user_fit") or 0.0),
+                    priority=float(row.get("priority") or 0.0),
+                    shareable=bool(row.get("shareable")),
+                    created_at=row.get("created_at") or utc_now(),
+                    expires_at=row.get("expires_at"),
+                    dedupe_key=str(row.get("dedupe_key") or row.get("candidate_id") or ""),
+                    artifact_path=row.get("artifact_path"),
+                )
+            )
+        if candidates:
+            logger.info("Loaded deferred proactive candidates count=%s", len(candidates))
+        return candidates
+
+    def _dedupe_candidates(self, candidates: list[ProactiveCandidate]) -> list[ProactiveCandidate]:
+        """Keep one candidate per dedupe key, preferring the highest current score."""
+        best: dict[str, tuple[float, ProactiveCandidate]] = {}
+        for candidate in candidates:
+            key = candidate.dedupe_key or candidate.candidate_id
+            score = self._score_candidate(candidate)
+            previous = best.get(key)
+            if previous is None or score > previous[0]:
+                best[key] = (score, candidate)
+        return [candidate for _, candidate in best.values()]
 
     async def _build_fallback_candidate(self) -> ProactiveCandidate | None:
         """构建`fallback`、候选项。
@@ -306,9 +359,11 @@ class ProactiveLoop:
                 "role": "system",
                 "content": (
                     "你负责把主动候选改写成一条自然的中文陪伴消息。"
-                    "语气像顺手分享网上刷到的有趣事情，不要像汇报、简报、播报或客服通知。"
+                    "语气要温柔、俏皮、可爱，像熟悉的小伙伴顺手分享网上刷到的有趣事情，不要像汇报、简报、播报或客服通知。"
+                    "开头可以轻轻接住用户，比如“刚刷到一个你可能会在意的小东西”“我顺手看到这个，想塞给你看看”。"
                     "只允许基于给定事实，不要编造细节，不要说自己用了搜索或工具。"
                     "输出 1 到 3 句，尽量控制在 90 字内；如果链接值得保留，可单独放最后一行。"
+                    "不要要求用户必须回复，不要制造压力。"
                 ),
             },
             {
@@ -374,14 +429,14 @@ class ProactiveLoop:
         url = candidate.url.strip()
         if candidate.source_type == "feed":
             headline = title or body or "我刷到一条新内容"
-            lines = [f"我刚刷到一个你可能会感兴趣的小发现：{headline}"]
+            lines = [f"我刚刷到一个你可能会感兴趣的小发现，顺手塞给你看看：{headline}"]
             if summary and summary not in {headline, body}:
                 lines.append(summary)
             if url:
                 lines.append(url)
             return "\n".join(lines)
         if candidate.source_type == "drift":
-            return body or title or "我刚想到一个也许值得和你分享的小发现。"
+            return body or title or "我刚想到一个也许值得和你分享的小发现，轻轻放你这儿。"
         return body or title or "我在旁边待命呢，有事轻轻喊我就好。"
 
     def _clean_candidate_message(self, text: str) -> str:
@@ -567,7 +622,8 @@ class ProactiveLoop:
                     "role": "system",
                     "content": (
                         "生成一句陪伴型中文 check-in，不超过 28 字。"
-                        "要亲昵、俏皮、可爱一点，但不要要求用户必须回复，不要像客服话术。"
+                        "要温柔、亲昵、俏皮、可爱一点，像熟悉的小伙伴轻轻探头。"
+                        "不要要求用户必须回复，不要像客服话术，不要制造压力。"
                     ),
                 },
                 {"role": "user", "content": "现在可以发什么？"},
@@ -598,7 +654,7 @@ class ProactiveLoop:
         返回:
             返回与本函数处理结果对应的数据。
         """
-        outbound = OutboundMessage(channel="telegram", chat_id=self.target_chat_id, content=text)
+        outbound = OutboundMessage(channel=self.channel_name, chat_id=self.target_chat_id, content=text)
         image_url = candidate.image_url.strip()
         if image_url and candidate.source_type in {"feed", "drift"}:
             outbound = OutboundMessage(

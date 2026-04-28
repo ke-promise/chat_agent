@@ -10,7 +10,7 @@ from datetime import datetime
 class ProactiveCandidate:
     """主动触达系统的统一候选结构。
 
-    Attributes:
+    字段:
         candidate_id: 候选唯一 id，用于去重、审计和确认发送。
         source_type: 候选来源类型，例如 fallback、feed 或 drift。
         title: 候选标题，便于日志和后台审计。

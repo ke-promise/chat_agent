@@ -31,7 +31,7 @@ class ConfigError(ValueError):
 class LLMConfig:
     """单个 LLM profile 的配置。
 
-    Attributes:
+    字段:
         model: 模型名，例如 qwen-plus、qwen-vl-plus。
         api_key: OpenAI-compatible API key。由环境变量展开后填入，禁止写死到代码。
         base_url: OpenAI-compatible 服务地址。
@@ -66,7 +66,7 @@ class LLMProfilesConfig:
 class TelegramConfig:
     """Telegram channel 配置。
 
-    Attributes:
+    字段:
         token: Telegram Bot Token，必须来自环境变量或本地 config。
         allow_from: username 白名单。为空时允许所有用户。
         unauthorized_reply: 未授权用户发消息时是否回复无权限提示。
@@ -79,6 +79,26 @@ class TelegramConfig:
     unauthorized_reply: bool
     download_images: bool = True
     image_max_mb: int = 10
+
+
+@dataclass(frozen=True)
+class QQBotConfig:
+    """QQ 官方 Bot 通道配置。"""
+
+    app_id: str
+    app_secret: str
+    sandbox: bool = False
+    host: str = "0.0.0.0"
+    port: int = 8080
+    path: str = "/qqbot"
+    verify_signature: bool = True
+    allow_from: list[str] | None = None
+    unauthorized_reply: bool = True
+    download_images: bool = False
+    image_max_mb: int = 10
+    max_text_chars: int = 1800
+    api_base_url: str = ""
+    token_url: str = "https://bots.qq.com/app/getAppAccessToken"
 
 
 @dataclass(frozen=True)
@@ -248,7 +268,7 @@ class LoggingConfig:
 class ObserveConfig:
     """可观测性数据库配置。
 
-    Attributes:
+    字段:
         database_path: trace、MCP 工具日志、proactive tick 等观测记录的 SQLite 路径。
             业务状态仍保存在 [memory].database_path；observe 数据库可以单独备份或清理。
     """
@@ -276,7 +296,9 @@ class AppConfig:
     """
 
     llm: LLMProfilesConfig
+    channel: str
     telegram: TelegramConfig
+    qq: QQBotConfig
     memory: MemoryConfig
     embedding: EmbeddingConfig
     reasoner: ReasonerConfig
@@ -292,11 +314,11 @@ class AppConfig:
 def _expand_env(value: Any, path: str = "") -> Any:
     """递归展开配置中的 `${ENV_NAME}`。
 
-    Args:
+    参数:
         value: 任意 TOML 解析值，可以是 str/list/dict/其他基础类型。
         path: 当前值在配置树中的路径，仅用于错误提示。
 
-    Returns:
+    返回:
         展开环境变量后的同结构值。
 
     Raises:
@@ -351,10 +373,10 @@ def _load_llm_profile(raw: dict[str, Any], name: str) -> LLMConfig:
 def load_config(path: str | Path) -> AppConfig:
     """加载 config.toml 并返回 AppConfig。
 
-    Args:
+    参数:
         path: TOML 配置文件路径。
 
-    Returns:
+    返回:
         已完成环境变量展开、默认值填充和相对路径解析的 AppConfig。
 
     Raises:
@@ -365,7 +387,23 @@ def load_config(path: str | Path) -> AppConfig:
         raise ConfigError(f"Config file not found: {config_path}")
 
     with config_path.open("rb") as f:
-        raw = _expand_env(tomllib.load(f))
+        raw_unexpanded = tomllib.load(f)
+
+    channel_raw = raw_unexpanded.get("channel", {})
+    if isinstance(channel_raw, dict):
+        channel = str(channel_raw.get("type", "telegram")).strip().lower()
+    else:
+        channel = str(channel_raw or "telegram").strip().lower()
+    if channel not in {"telegram", "qq"}:
+        raise ConfigError("channel.type must be one of: telegram, qq")
+
+    # 非当前启用通道的示例配置可能包含环境变量占位符，这里先移除，避免把未启用通道的凭证也变成必填项。
+    raw_to_expand = dict(raw_unexpanded)
+    if channel == "telegram":
+        raw_to_expand.pop("qq", None)
+    else:
+        raw_to_expand.pop("telegram", None)
+    raw = _expand_env(raw_to_expand)
 
     llm_raw = raw.get("llm", {})
     if "main" in llm_raw:
@@ -384,6 +422,7 @@ def load_config(path: str | Path) -> AppConfig:
         )
 
     telegram = raw.get("telegram", {})
+    qq = raw.get("qq", {})
     memory = raw.get("memory", {})
     embedding = raw.get("embedding", {})
     tools = raw.get("tools", {})
@@ -430,12 +469,29 @@ def load_config(path: str | Path) -> AppConfig:
 
     return AppConfig(
         llm=LLMProfilesConfig(main=main_llm, fast=fast_llm),
+        channel=channel,
         telegram=TelegramConfig(
-            token=_require(telegram.get("token"), "telegram.token"),
+            token=_require(telegram.get("token"), "telegram.token") if channel == "telegram" else str(telegram.get("token", "")),
             allow_from=[str(item).lstrip("@") for item in telegram.get("allow_from", [])],
             unauthorized_reply=bool(telegram.get("unauthorized_reply", True)),
             download_images=bool(telegram.get("download_images", True)),
             image_max_mb=int(telegram.get("image_max_mb", 10)),
+        ),
+        qq=QQBotConfig(
+            app_id=_require(qq.get("app_id"), "qq.app_id") if channel == "qq" else str(qq.get("app_id", "")),
+            app_secret=_require(qq.get("app_secret"), "qq.app_secret") if channel == "qq" else str(qq.get("app_secret", "")),
+            sandbox=bool(qq.get("sandbox", False)),
+            host=str(qq.get("host", "0.0.0.0")),
+            port=int(qq.get("port", 8080)),
+            path=str(qq.get("path", "/qqbot")),
+            verify_signature=bool(qq.get("verify_signature", True)),
+            allow_from=[str(item) for item in qq.get("allow_from", [])],
+            unauthorized_reply=bool(qq.get("unauthorized_reply", True)),
+            download_images=bool(qq.get("download_images", False)),
+            image_max_mb=int(qq.get("image_max_mb", 10)),
+            max_text_chars=int(qq.get("max_text_chars", 1800)),
+            api_base_url=str(qq.get("api_base_url", "")),
+            token_url=str(qq.get("token_url", "https://bots.qq.com/app/getAppAccessToken")),
         ),
         memory=MemoryConfig(
             enabled=bool(memory.get("enabled", True)),

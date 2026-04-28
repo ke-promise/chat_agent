@@ -1,1 +1,1 @@
-"""Tool registry and built-in tools."""
+"""工具注册表与内置工具集合。"""

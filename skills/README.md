@@ -1,6 +1,6 @@
 # Builtin Skills
 
-这里是当前 Telegram-only `chat_agent` 项目的内置 SKILL.md 说明书。
+这里是当前 `chat_agent` 项目的内置 SKILL.md 说明书。
 
 Skill 的作用是给 Agent 提供“做事前看的 SOP”，不是 Python 插件，也不是 MCP server。
 
@@ -21,8 +21,8 @@ workspace/drift/skills/<name>/SKILL.md # 空闲 drift 专用技能
 
 ## 本项目边界
 
-- 只支持 Telegram。
-- 不包含 QQ、NapCat、Discord 或复杂多通道抽象。
+- 支持 Telegram 与 QQ 官方 Bot 渠道。
+- 不包含 NapCat、Discord 或复杂多通道抽象。
 - 可通过 MCP 接入外部工具，但 skill 本身不启动 MCP server。
 - 文件工具默认只能操作 `[tools].file_workspace`，通常是 `workspace/files`。
 

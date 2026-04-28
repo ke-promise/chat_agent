@@ -14,12 +14,31 @@ timeout_seconds = 20
 max_tokens = 1024
 enable_vision = false
 
+[channel]
+# telegram or qq
+type = "telegram"
+
 [telegram]
 token = "${TELEGRAM_BOT_TOKEN}"
 allow_from = ["your_username"]
 unauthorized_reply = true
 download_images = true
 image_max_mb = 10
+
+[qq]
+app_id = "${QQ_BOT_APP_ID}"
+app_secret = "${QQ_BOT_APP_SECRET}"
+sandbox = false
+host = "0.0.0.0"
+port = 8080
+path = "/qqbot"
+verify_signature = true
+# QQ openid / group member openid allowlist. Empty means allow all.
+allow_from = []
+unauthorized_reply = true
+download_images = false
+image_max_mb = 10
+max_text_chars = 1800
 
 [memory]
 enabled = true

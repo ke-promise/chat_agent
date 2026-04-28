@@ -252,7 +252,7 @@ class SkillsLoader:
         records: dict[str, SkillRecord] = {}
         if self.builtin_skills_dir:
             records.update(self._scan_dir(self.builtin_skills_dir, "builtin"))
-        # Workspace wins by scanning last.
+        # 后扫描 workspace，让同名用户 skill 覆盖内置 skill。
         records.update(self._scan_dir(self.workspace, "workspace"))
         return records
 

@@ -183,7 +183,6 @@ async def test_mcp_missing_env_placeholder_skips_server(tmp_path: Path, monkeypa
 
     assert registry.servers == {}
 
-
 @pytest.mark.asyncio
 async def test_mcp_allowed_tools_filters_registration_and_calls(tmp_path: Path) -> None:
     server = tmp_path / "fake_allow_mcp.py"
@@ -299,7 +298,6 @@ for line in sys.stdin:
     assert result["content"] == "hello alice"
 
     await registry.shutdown()
-
 
 @pytest.mark.asyncio
 async def test_duckduckgo_search_results_are_normalized(tmp_path: Path) -> None:

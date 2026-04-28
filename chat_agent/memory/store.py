@@ -1632,6 +1632,87 @@ class SQLiteStore:
 
         return await asyncio.to_thread(run)
 
+    async def list_deferred_proactive_candidates(
+        self,
+        chat_id: str,
+        source_types: list[str] | None = None,
+        drop_reasons: list[str] | None = None,
+        limit: int = 5,
+    ) -> list[dict[str, Any]]:
+        """列出之前被延迟但仍可重新考虑的主动候选。
+
+        参数:
+            chat_id: 主动消息目标会话。
+            source_types: 允许恢复的候选来源类型，默认只恢复 drift。
+            drop_reasons: 允许恢复的延迟原因，默认包含预算、忙碌和静默时段。
+            limit: 最多返回多少条候选。
+
+        返回:
+            可再次进入本轮主动排序的候选字典列表。
+        """
+        source_types = source_types or ["drift"]
+        drop_reasons = drop_reasons or ["budget", "busy", "quiet_hours"]
+        limit = max(0, int(limit))
+        if not source_types or not drop_reasons or limit <= 0:
+            return []
+
+        def run() -> list[dict[str, Any]]:
+            """在线程中查询可恢复候选，避免阻塞事件循环。"""
+            source_placeholders = ",".join("?" for _ in source_types)
+            reason_placeholders = ",".join("?" for _ in drop_reasons)
+            now = _utc_now_iso()
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT
+                        pc.candidate_id,
+                        pc.source_type,
+                        pc.title,
+                        pc.body,
+                        pc.url,
+                        pc.confidence,
+                        pc.novelty,
+                        pc.user_fit,
+                        pc.priority,
+                        pc.shareable,
+                        pc.dedupe_key,
+                        pc.artifact_path,
+                        pc.created_at,
+                        pc.expires_at,
+                        pc.score
+                    FROM proactive_candidates pc
+                    LEFT JOIN seen_items seen ON seen.item_key = pc.dedupe_key
+                    WHERE pc.chat_id = ?
+                      AND pc.status = 'dropped'
+                      AND pc.shareable = 1
+                      AND pc.source_type IN ({source_placeholders})
+                      AND pc.drop_reason IN ({reason_placeholders})
+                      AND (pc.expires_at IS NULL OR pc.expires_at > ?)
+                      AND seen.item_key IS NULL
+                    ORDER BY pc.score DESC, pc.created_at DESC
+                    LIMIT ?
+                    """,
+                    (chat_id, *source_types, *drop_reasons, now, limit * 4),
+                ).fetchall()
+
+            candidates: list[dict[str, Any]] = []
+            seen_keys: set[str] = set()
+            for row in rows:
+                item = dict(row)
+                key = str(item.get("dedupe_key") or item.get("candidate_id") or "")
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                item["shareable"] = bool(item["shareable"])
+                item["created_at"] = _from_iso(item.get("created_at")) or utc_now()
+                item["expires_at"] = _from_iso(item.get("expires_at"))
+                candidates.append(item)
+                if len(candidates) >= limit:
+                    break
+            return candidates
+
+        return await asyncio.to_thread(run)
+
     async def mark_seen_item(self, item_key: str, source: str, title: str | None = None, url: str | None = None) -> None:
         """把 feed 事件标记为已见，避免重复推送。"""
         def run() -> None:

@@ -190,3 +190,39 @@ def test_load_config_rejects_legacy_proactive_schema(tmp_path: Path, monkeypatch
 
     with pytest.raises(ConfigError, match="Deprecated proactive config keys"):
         load_config(config_file)
+
+
+def test_load_config_accepts_qq_channel_without_telegram_token(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("QWEN_API_KEY", "key")
+    config_file = tmp_path / "config.toml"
+    config_file.write_text(
+        """
+        [channel]
+        type = "qq"
+
+        [llm.main]
+        model = "qwen-plus"
+        api_key = "${QWEN_API_KEY}"
+        base_url = "https://example.test/v1"
+
+        [telegram]
+        token = "${TELEGRAM_BOT_TOKEN}"
+
+        [qq]
+        app_id = "app-id"
+        app_secret = "secret"
+        port = 9000
+        path = "/qqbot"
+        allow_from = ["user-openid"]
+        """,
+        encoding="utf-8",
+    )
+
+    config = load_config(config_file)
+
+    assert config.channel == "qq"
+    assert config.telegram.token == ""
+    assert config.qq.app_id == "app-id"
+    assert config.qq.app_secret == "secret"
+    assert config.qq.port == 9000
+    assert config.qq.allow_from == ["user-openid"]

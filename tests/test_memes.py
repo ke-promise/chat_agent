@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -22,8 +23,24 @@ from chat_agent.agent.provider import LLMResult
 
 
 class FakeProvider:
+    config = SimpleNamespace(enable_vision=True)
+
     async def chat(self, messages, tools=None):
         return LLMResult(content="好呀，给你一张", tool_calls=[])
+
+
+class FakeVisionMemeProvider:
+    config = SimpleNamespace(enable_vision=True)
+
+    async def chat(self, messages, tools=None):
+        return LLMResult(content="这是一个可爱的表情包，角色正在竖大拇指给人加油鼓励。", tool_calls=[])
+
+
+class FakeVisionPhotoProvider:
+    config = SimpleNamespace(enable_vision=True)
+
+    async def chat(self, messages, tools=None):
+        return LLMResult(content="这是一张普通照片，画面里是一杯咖啡。", tool_calls=[])
 
 
 class FakeChannel:
@@ -38,6 +55,21 @@ def _build_loop(store: SQLiteStore, file_workspace: Path) -> AgentLoop:
     tools = build_default_registry(store, file_workspace=file_workspace)
     context = ContextBuilder(store, MemoryRetriever(store), tools)
     reasoner = Reasoner(FakeProvider(), tools)
+    meme_service = MemeService(file_workspace)
+    return AgentLoop(
+        store,
+        context,
+        reasoner,
+        TraceRecorder(store),
+        PresenceTracker(store),
+        meme_service=meme_service,
+    )
+
+
+def _build_loop_with_provider(store: SQLiteStore, file_workspace: Path, provider) -> AgentLoop:
+    tools = build_default_registry(store, file_workspace=file_workspace)
+    context = ContextBuilder(store, MemoryRetriever(store), tools, vision_enabled=True)
+    reasoner = Reasoner(provider, tools)
     meme_service = MemeService(file_workspace)
     return AgentLoop(
         store,
@@ -72,6 +104,84 @@ async def test_ingest_image_into_meme_library(tmp_path: Path) -> None:
     assert (tmp_path / "files" / "memes" / "happy" / "001.png").exists()
     manifest = (tmp_path / "files" / "memes" / "manifest.json").read_text(encoding="utf-8")
     assert '"happy"' in manifest
+
+
+@pytest.mark.asyncio
+async def test_ingest_previous_image_into_meme_library(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    loop = _build_loop(store, tmp_path / "files")
+
+    image = tmp_path / "attachments" / "source.png"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"fake-image")
+
+    await loop.handle_message(
+        InboundMessage(
+            channel="qq",
+            chat_id="chat-1",
+            sender="user-1",
+            content="请描述这张图片。",
+            attachments=[Attachment(kind="image", file_id="f1", local_path=str(image), mime_type="image/png")],
+        )
+    )
+
+    outbound = await loop.handle_message(
+        InboundMessage(
+            channel="qq",
+            chat_id="chat-1",
+            sender="user-1",
+            content="存成表情包：happy",
+        )
+    )
+
+    assert "收进表情包库" in outbound.content
+    assert (tmp_path / "files" / "memes" / "happy" / "001.png").exists()
+
+
+@pytest.mark.asyncio
+async def test_auto_ingests_image_when_model_recognizes_meme(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    loop = _build_loop_with_provider(store, tmp_path / "files", FakeVisionMemeProvider())
+
+    image = tmp_path / "attachments" / "source.png"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"fake-image")
+
+    outbound = await loop.handle_message(
+        InboundMessage(
+            channel="qq",
+            chat_id="chat-1",
+            sender="user-1",
+            content="请描述这张图片。",
+            attachments=[Attachment(kind="image", file_id="f1", local_path=str(image), mime_type="image/png")],
+        )
+    )
+
+    assert "顺手把它收进表情包库" in outbound.content
+    assert (tmp_path / "files" / "memes" / "鼓励" / "001.png").exists()
+
+
+@pytest.mark.asyncio
+async def test_does_not_auto_ingest_regular_photo(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    loop = _build_loop_with_provider(store, tmp_path / "files", FakeVisionPhotoProvider())
+
+    image = tmp_path / "attachments" / "source.png"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"fake-image")
+
+    outbound = await loop.handle_message(
+        InboundMessage(
+            channel="qq",
+            chat_id="chat-1",
+            sender="user-1",
+            content="请描述这张图片。",
+            attachments=[Attachment(kind="image", file_id="f1", local_path=str(image), mime_type="image/png")],
+        )
+    )
+
+    assert "收进表情包库" not in outbound.content
+    assert not (tmp_path / "files" / "memes").exists()
 
 
 @pytest.mark.asyncio

@@ -21,7 +21,7 @@ ToolRisk = Literal["read", "write", "side_effect"]
 class ToolContext:
     """传入工具实现函数的运行时上下文。
 
-    Attributes:
+    字段:
         message: 触发本次工具调用的入站消息。
         store: 供工具读写业务状态的存储层对象。
     """
@@ -37,7 +37,7 @@ ToolFunc = Callable[[ToolContext, dict[str, Any]], str | Awaitable[str]]
 class Tool:
     """统一的工具定义。
 
-    Attributes:
+    字段:
         name: 工具名，必须在整个注册表中唯一。
         description: 提供给模型和调试日志的工具说明。
         parameters: JSON Schema 形式的参数定义。

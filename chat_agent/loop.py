@@ -14,7 +14,7 @@ from chat_agent.memory.consolidation import ConsolidationService
 from chat_agent.memory.embeddings import EmbeddingProvider
 from chat_agent.memory.store import SQLiteStore, re_split_query
 from chat_agent.memory.vector_store import VectorStore
-from chat_agent.messages import InboundMessage, OutboundMessage
+from chat_agent.messages import Attachment, InboundMessage, OutboundMessage
 from chat_agent.observe.trace import TraceRecorder
 from chat_agent.presence import PresenceTracker
 from chat_agent.reasoner import Reasoner
@@ -28,6 +28,19 @@ MEMORIZE_RE = re.compile(r"^\s*记住[：:]\s*(?P<content>.+)\s*$")
 RECALL_RE = re.compile(r"(你记得什么|回忆一下|记得我|你记得)")
 CONFIRM_RE = re.compile(r"^\s*(记住这个|对[，,\s]*就是这个)\s*$")
 MEME_SAVE_RE = re.compile(r"(?:存成|记成|收录成|加入)(?:一张|个)?表情包[：: ]*(?P<category>[0-9A-Za-z_\-\u4e00-\u9fff]{1,32})")
+RECENT_IMAGE_TTL_SECONDS = 300
+AUTO_MEME_POSITIVE_MARKERS = ("表情包", "梗图", "贴纸", "meme", "emoji", "斗图")
+AUTO_MEME_NEGATIVE_MARKERS = ("不是表情包", "不像表情包", "普通照片", "截图", "文档", "证件", "二维码")
+AUTO_MEME_CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
+    ("鼓励", ("加油", "鼓励", "大拇指", "点赞", "没问题", "你很棒", "支持")),
+    ("抱抱", ("抱抱", "安慰", "委屈", "难过", "心疼", "哭", "陪着你")),
+    ("开心", ("开心", "高兴", "笑", "哈哈", "快乐", "太棒")),
+    ("可爱", ("可爱", "萌", "贴贴", "乖", "软乎")),
+    ("无语", ("无语", "尴尬", "沉默", "汗颜", "疑惑")),
+    ("生气", ("生气", "愤怒", "气鼓鼓", "炸毛")),
+    ("害羞", ("害羞", "脸红", "不好意思")),
+    ("晚安", ("晚安", "睡觉", "困", "打哈欠")),
+]
 
 
 class AgentLoop:
@@ -49,6 +62,8 @@ class AgentLoop:
         vector_store: VectorStore | None = None,
         consolidation_service: ConsolidationService | None = None,
         meme_service: MemeService | None = None,
+        model_main: str = "",
+        model_fast: str = "",
     ) -> None:
         """初始化被动对话主循环。
 
@@ -82,6 +97,9 @@ class AgentLoop:
         self.vector_store = vector_store
         self.consolidation_service = consolidation_service
         self.meme_service = meme_service
+        self.model_main = model_main
+        self.model_fast = model_fast
+        self._recent_image_attachments: dict[str, tuple[Attachment, float]] = {}
 
     async def handle_message(self, message: InboundMessage) -> OutboundMessage:
         """处理一条入站消息并生成最终出站回复。
@@ -105,7 +123,7 @@ class AgentLoop:
         try:
             text = message.content.strip()
             if not text and not message.attachments:
-                reply = "我收到了一小团空白消息，还没读出你的意思呢。"
+                reply = "我收到了一小团空白消息，还没读出你的意思呢。你再轻轻发我一次就好。"
             else:
                 direct = await self._handle_direct_paths(message)
                 if direct is not None:
@@ -114,11 +132,14 @@ class AgentLoop:
                     bundle = await self.context_builder.build(message)
                     memory_hits = [_memory_hit_summary(item) for item in bundle.memory_hits]
                     result = await self.reasoner.run(bundle, message)
-                    reply = format_reply(result.reply or "我暂时没有生成有效回复。")
+                    reply = format_reply(result.reply or "我刚刚没组织出合适的回答，稍等一下我们再来一次。")
                     tools_used = result.tools_used
                     mcp_tools_used = result.mcp_tools_used
                     error = result.error
                     hyde_used = bool(bundle.trace.get("hyde_used"))
+                    auto_meme_note = self._auto_ingest_recognized_meme(message, reply)
+                    if auto_meme_note:
+                        reply = f"{reply}\n\n{auto_meme_note}"
 
             await self._commit(message, reply)
             latency_ms = int((time.perf_counter() - start) * 1000)
@@ -130,6 +151,8 @@ class AgentLoop:
                 memory_hits=memory_hits,
                 latency_ms=latency_ms,
                 error=error,
+                model_main=self.model_main,
+                model_fast=self.model_fast,
                 mcp_tools_used=mcp_tools_used,
                 hyde_used=hyde_used,
                 attachments_count=len(message.attachments),
@@ -156,6 +179,8 @@ class AgentLoop:
                 memory_hits,
                 latency_ms,
                 error=str(exc),
+                model_main=self.model_main,
+                model_fast=self.model_fast,
                 mcp_tools_used=mcp_tools_used,
                 attachments_count=len(message.attachments),
             )
@@ -171,23 +196,18 @@ class AgentLoop:
         """
         text = message.content.strip()
         if message.attachments:
+            self._remember_recent_image(message)
             saved = self._extract_meme_category(text)
             if saved and self.meme_service:
-                result = self.meme_service.ingest_attachment(message.attachments[0], saved, description=f"{saved} 表情包")
-                if result.match:
-                    logger.info(
-                        "Saved meme chat_id=%s category=%s path=%s status=%s",
-                        message.chat_id,
-                        result.match.category,
-                        result.match.path,
-                        result.status,
-                    )
-                    if result.status == "duplicate":
-                        return f"这张已经在表情包库里啦：{result.match.category}/{result.match.path.name}"
-                    return f"好呀，这张我已经收进表情包库啦：{result.match.category}/{result.match.path.name}"
-                if result.reason == "category_full":
-                    return f"{saved} 这个分类已经装得太满啦，先清一清再继续收图比较稳妥。"
-                return "我看见这张图啦，但它还没成功落到本地，暂时没法收进表情包库。"
+                return self._ingest_meme_attachment(message, message.attachments[0], saved)
+
+        if not message.attachments:
+            saved = self._extract_meme_category(text)
+            if saved and self.meme_service:
+                cached = self._pop_recent_image_attachment(message.chat_id)
+                if cached:
+                    return self._ingest_meme_attachment(message, cached, saved)
+                return "我还没拿到可收录的本地图片呢。你可以先发一张图，再在 5 分钟内说“存成表情包：分类”，我就会乖乖收好。"
 
         if not text:
             return None
@@ -306,13 +326,13 @@ class AgentLoop:
         await self.store.upsert_summary(chat_id, summary, count)
 
     def _schedule_consolidation(self, chat_id: str) -> None:
-        """调度`consolidation`。
+        """为指定会话启动一次后台记忆整理任务。
 
         参数:
-            chat_id: 参与调度`consolidation`的 `chat_id` 参数。
+            chat_id: 需要整理会话历史和候选记忆的会话 ID。
 
-        返回:
-            返回与本函数处理结果对应的数据。
+        说明:
+            该任务通过 create_task 后台运行，失败时由回调记录日志，不阻塞当前用户回复。
         """
         if not self.memory_enabled or not self.consolidation_service:
             return
@@ -320,13 +340,13 @@ class AgentLoop:
         task.add_done_callback(_log_background_task_error)
 
     async def _handle_natural_correction(self, message: InboundMessage) -> str | None:
-        """处理`natural`、`correction`。
+        """识别用户的自然语言纠错，并把旧记忆替换成新版记忆。
 
         参数:
-            message: 参与处理`natural`、`correction`的 `message` 参数。
+            message: 当前入站消息，内容里可能包含“不是……而是……”这类纠错表达。
 
         返回:
-            返回与本函数处理结果对应的数据。
+            命中纠错时返回要直接回复用户的文本；未命中时返回 None，让主模型继续处理。
         """
         parsed = _parse_correction(message.content)
         if not parsed:
@@ -364,13 +384,13 @@ class AgentLoop:
         return f"收到，我已经把旧记忆改成新版啦：{new_content}"
 
     async def _confirm_latest_candidate(self, chat_id: str) -> str | None:
-        """确认`latest`、候选项。
+        """把最近一条候选记忆正式晋升为长期记忆。
 
         参数:
-            chat_id: 参与确认`latest`、候选项的 `chat_id` 参数。
+            chat_id: 当前会话 ID。
 
         返回:
-            返回与本函数处理结果对应的数据。
+            晋升成功时返回确认文案；没有候选记忆时返回 None。
         """
         candidates = await self.store.get_memory_candidates(chat_id, limit=3)
         if not candidates:
@@ -392,13 +412,13 @@ class AgentLoop:
         return f"好呀，这条我已经正式记住啦：{latest['content']}"
 
     async def _promote_candidates(self, chat_id: str) -> None:
-        """提升候选集合。
+        """自动晋升证据足够的候选记忆。
 
         参数:
-            chat_id: 参与提升候选集合的 `chat_id` 参数。
+            chat_id: 当前会话 ID。
 
-        返回:
-            返回与本函数处理结果对应的数据。
+        说明:
+            SQLiteStore 会筛出达到证据阈值的候选项；本函数负责写入长期记忆、补向量并归档候选。
         """
         candidates = await self.store.promote_ready_candidates(chat_id, min_evidence=2)
         for candidate in candidates:
@@ -417,15 +437,12 @@ class AgentLoop:
             await self.store.archive_memory_candidate(chat_id, int(candidate["id"]), status="promoted")
 
     async def _embed_memory(self, chat_id: str, memory_id: int, content: str) -> None:
-        """生成向量记忆。
+        """为一条长期记忆生成 embedding 并写入向量存储。
 
         参数:
-            chat_id: 参与生成向量记忆的 `chat_id` 参数。
-            memory_id: 参与生成向量记忆的 `memory_id` 参数。
-            content: 参与生成向量记忆的 `content` 参数。
-
-        返回:
-            返回与本函数处理结果对应的数据。
+            chat_id: 记忆所属会话 ID。
+            memory_id: 已写入 SQLite 的长期记忆 ID。
+            content: 需要向量化的记忆正文。
         """
         if not self.embedding_provider or not self.vector_store:
             return
@@ -439,40 +456,116 @@ class AgentLoop:
             logger.exception("Failed to embed memory id=%s chat_id=%s", memory_id, chat_id)
 
     def _decorate_outbound(self, message: InboundMessage, outbound: OutboundMessage) -> OutboundMessage:
-        """补充出站消息。
+        """根据表情包策略为被动回复补充出站附件。
 
         参数:
-            message: 参与补充出站消息的 `message` 参数。
-            outbound: 参与补充出站消息的 `outbound` 参数。
+            message: 当前入站消息，用于判断用户语气和触发场景。
+            outbound: 已生成的出站文本消息。
 
         返回:
-            返回与本函数处理结果对应的数据。
+            可能带有表情包附件的新出站消息。
         """
         if not self.meme_service:
             return outbound
         return self.meme_service.decorate_outbound(outbound, inbound_text=message.content, source="passive")
 
     def _extract_meme_category(self, text: str) -> str:
-        """提取`meme`、分类。
+        """从用户文本中提取“存成表情包：分类”里的分类名。
 
         参数:
-            text: 参与提取`meme`、分类的 `text` 参数。
+            text: 用户原始文本。
 
         返回:
-            返回与本函数处理结果对应的数据。
+            匹配到的分类名；未匹配时返回空字符串。
         """
         match = MEME_SAVE_RE.search(text.strip())
         return match.group("category").strip() if match else ""
 
+    def _remember_recent_image(self, message: InboundMessage) -> None:
+        """缓存最近一张图片附件，方便用户下一条文本命令把它收成表情包。"""
+        for attachment in message.attachments:
+            if attachment.kind == "image":
+                self._recent_image_attachments[message.chat_id] = (attachment, time.time())
+                return
+
+    def _pop_recent_image_attachment(self, chat_id: str) -> Attachment | None:
+        """取出并移除指定会话最近缓存的图片附件，超过有效期则丢弃。"""
+        cached = self._recent_image_attachments.pop(chat_id, None)
+        if not cached:
+            return None
+        attachment, created_at = cached
+        if time.time() - created_at > RECENT_IMAGE_TTL_SECONDS:
+            return None
+        return attachment
+
+    def _ingest_meme_attachment(self, message: InboundMessage, attachment: Attachment, category: str) -> str:
+        """把用户发来的图片附件收录到本地表情包库。"""
+        if not self.meme_service:
+            return "表情包服务还没启用，暂时不能收图。"
+        result = self.meme_service.ingest_attachment(attachment, category, description=f"{category} 表情包")
+        if result.match:
+            logger.info(
+                "Saved meme chat_id=%s category=%s path=%s status=%s",
+                message.chat_id,
+                result.match.category,
+                result.match.path,
+                result.status,
+            )
+            if result.status == "duplicate":
+                return f"这张已经在表情包库里啦：{result.match.category}/{result.match.path.name}"
+            return f"好呀，这张我已经收进表情包库啦：{result.match.category}/{result.match.path.name}"
+        if result.reason == "category_full":
+            return f"{category} 这个分类已经装得太满啦，先清一清再继续收图比较稳妥。"
+        if result.reason == "unsupported_attachment":
+            return "我看见这张图啦，但它还没成功落到本地。QQ 需要先把 [qq].download_images 改成 true，才能收进表情包库。"
+        return "我看见这张图啦，但它还没成功落到本地，暂时没法收进表情包库。"
+
+    def _auto_ingest_recognized_meme(self, message: InboundMessage, reply: str) -> str:
+        """当模型识别出图片是表情包时，按规则自动收录并返回附加说明。"""
+        if not self.meme_service or not message.attachments or self._extract_meme_category(message.content):
+            return ""
+        category = self._infer_auto_meme_category(message.content, reply)
+        if not category:
+            return ""
+        attachment = next((item for item in message.attachments if item.kind == "image"), None)
+        if not attachment:
+            return ""
+        result = self.meme_service.ingest_attachment(attachment, category, description=f"{category} 表情包")
+        if not result.match:
+            logger.info("Auto meme ingest skipped chat_id=%s category=%s reason=%s", message.chat_id, category, result.reason)
+            return ""
+        logger.info(
+            "Auto saved recognized meme chat_id=%s category=%s path=%s status=%s",
+            message.chat_id,
+            result.match.category,
+            result.match.path,
+            result.status,
+        )
+        if result.status == "duplicate":
+            return ""
+        return f"我也顺手把它收进表情包库啦：{result.match.category}/{result.match.path.name}"
+
+    def _infer_auto_meme_category(self, text: str, reply: str) -> str:
+        """根据用户文本和模型回复推断自动收录表情包的分类。"""
+        haystack = f"{text}\n{reply}".lower()
+        if any(marker.lower() in haystack for marker in AUTO_MEME_NEGATIVE_MARKERS):
+            return ""
+        if not any(marker.lower() in haystack for marker in AUTO_MEME_POSITIVE_MARKERS):
+            return ""
+        for category, tokens in AUTO_MEME_CATEGORY_RULES:
+            if any(token.lower() in haystack for token in tokens):
+                return category
+        return "未分类"
+
 
 def _infer_memory_type(content: str) -> str:
-    """推断记忆、`type`。
+    """根据记忆正文粗略推断长期记忆类型。
 
     参数:
-        content: 参与推断记忆、`type`的 `content` 参数。
+        content: 待分类的记忆正文。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        preference、procedure、event 或 fact。
     """
     if any(token in content for token in ["喜欢", "偏好", "习惯"]):
         return "preference"
@@ -484,13 +577,13 @@ def _infer_memory_type(content: str) -> str:
 
 
 def _normalize_recall_query(text: str) -> str:
-    """归一化`recall`、查询词。
+    """把自然语言回忆问题压缩成适合记忆检索的关键词。
 
     参数:
-        text: 参与归一化`recall`、查询词的 `text` 参数。
+        text: 用户原始问题。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        去掉固定问法后的检索短语。
     """
     query = text
     for token in ["你记得什么", "回忆一下", "你记得", "记得我", "吗", "？", "?", "什么"]:
@@ -499,13 +592,13 @@ def _normalize_recall_query(text: str) -> str:
 
 
 def _extract_profile_updates(text: str) -> dict[str, object]:
-    """提取用户画像、`updates`。
+    """从用户文本中提取可直接写入用户画像的轻量字段。
 
     参数:
-        text: 参与提取用户画像、`updates`的 `text` 参数。
+        text: 用户原始文本。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        包含 name、preferences、dislikes 或 reply_style 的更新字典。
     """
     updates: dict[str, object] = {}
     nickname_match = re.search(r"我(?:叫|是)\s*([\u4e00-\u9fffA-Za-z0-9_-]{1,32})", text)
@@ -524,13 +617,13 @@ def _extract_profile_updates(text: str) -> dict[str, object]:
 
 
 def _high_confidence_inferred_memories(text: str) -> list[tuple[str, str, list[str], float]]:
-    """处理`confidence`、`inferred`、记忆集合。
+    """从用户文本中抽取高置信度的隐式长期记忆。
 
     参数:
-        text: 参与处理`confidence`、`inferred`、记忆集合的 `text` 参数。
+        text: 用户原始文本。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        记忆正文、类型、标签和重要度组成的列表。
     """
     if MEMORIZE_RE.match(text):
         return []
@@ -551,13 +644,13 @@ def _high_confidence_inferred_memories(text: str) -> list[tuple[str, str, list[s
 
 
 def _candidate_memories(text: str) -> list[tuple[str, str, list[str], float, float]]:
-    """处理记忆集合。
+    """从用户文本中抽取需要后续证据确认的候选记忆。
 
     参数:
-        text: 参与处理记忆集合的 `text` 参数。
+        text: 用户原始文本。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        记忆正文、类型、标签、重要度和置信度组成的列表。
     """
     if MEMORIZE_RE.match(text):
         return []
@@ -576,13 +669,13 @@ def _candidate_memories(text: str) -> list[tuple[str, str, list[str], float, flo
 
 
 def _parse_correction(text: str) -> tuple[str, str] | None:
-    """解析`correction`。
+    """解析“不是旧说法，新说法是……”这类自然语言记忆纠错。
 
     参数:
-        text: 参与解析`correction`的 `text` 参数。
+        text: 用户原始文本。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        成功时返回旧记忆查询词和新记忆正文；无法解析时返回 None。
     """
     normalized = text.strip()
     if "不是" not in normalized:
@@ -604,14 +697,14 @@ def _parse_correction(text: str) -> tuple[str, str] | None:
 
 
 def _correction_similarity(content: str, query: str) -> float:
-    """处理`similarity`。
+    """计算候选旧记忆和纠错查询之间的简单词项相似度。
 
     参数:
-        content: 参与处理`similarity`的 `content` 参数。
-        query: 参与处理`similarity`的 `query` 参数。
+        content: 候选旧记忆正文。
+        query: 用户纠错中提到的旧内容线索。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        0 到 1 之间的匹配分数。
     """
     content_terms = set(re_split_query(content.lower()))
     query_terms = set(re_split_query(query.lower()))
@@ -624,13 +717,13 @@ def _correction_similarity(content: str, query: str) -> float:
 
 
 def _memory_hit_summary(item: dict[str, Any]) -> dict[str, Any]:
-    """处理`hit`、摘要。
+    """把完整记忆命中压缩成 trace 中使用的摘要字段。
 
     参数:
-        item: 参与处理`hit`、摘要的 `item` 参数。
+        item: MemoryRetriever 返回的记忆命中字典。
 
     返回:
-        返回与本函数处理结果对应的数据。
+        只包含 id、分数、命中原因、来源和类型的轻量字典。
     """
     return {
         "id": int(item["id"]),
@@ -642,13 +735,10 @@ def _memory_hit_summary(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def _log_background_task_error(task: asyncio.Task) -> None:
-    """处理`background`、`task`、`error`。
+    """记录后台记忆任务异常，避免 asyncio task 错误被吞掉。
 
     参数:
-        task: 参与处理`background`、`task`、`error`的 `task` 参数。
-
-    返回:
-        返回与本函数处理结果对应的数据。
+        task: 已完成的后台任务。
     """
     try:
         task.result()

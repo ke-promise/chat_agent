@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 class ConsolidationResult:
     """一次会话整理任务的执行结果。
 
-    Attributes:
+    字段:
         ran: 本次整理是否实际执行。
         source_ref: 本次整理对应的会话窗口引用，便于审计去重。
         message_count: 参与整理的会话消息数。

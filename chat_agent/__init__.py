@@ -1,1 +1,1 @@
-"""Telegram-only personal agent MVP."""
+"""Personal agent MVP."""
