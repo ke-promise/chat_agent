@@ -74,6 +74,11 @@ class CountingProvider:
         return type("Result", (), {"ok": True, "content": self.content})()
 
 
+class FakeEmbeddingProvider:
+    async def embed(self, text: str) -> list[float] | None:
+        return [1.0, 0.0] if "鸣潮" in text else [0.0, 1.0]
+
+
 def _candidate(
     source_type: str,
     candidate_id: str,
@@ -132,6 +137,7 @@ def _loop(tmp_path: Path, store: SQLiteStore, channel: FakeChannel, **kwargs) ->
         fallback_provider=kwargs.get("fallback_provider"),
         feed_manager=kwargs.get("feed_manager"),
         drift_manager=kwargs.get("drift_manager"),
+        embedding_provider=kwargs.get("embedding_provider"),
     )
 
 
@@ -172,13 +178,20 @@ async def test_feed_candidates_are_ranked_globally_not_by_input_order(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_proactive_drops_recent_similar_topic_delivery(tmp_path: Path) -> None:
+async def test_proactive_drops_semantically_similar_delivery_within_retention(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
-    await store.add_proactive_delivery(
+    previous = "诶我刚看到鸣潮3.3明天就开服了，二周年版本好像挺大的，新地图黯原还有摩托滑翔啥的～"
+    delivery_id = await store.add_proactive_delivery(
         "chat-1",
-        "诶我刚看到鸣潮3.3明天就开服了，二周年版本好像挺大的，新地图黯原还有摩托滑翔啥的～",
+        previous,
         "drift",
     )
+    await store.add_proactive_delivery_embedding(delivery_id, "chat-1", "drift", previous, [1.0, 0.0])
+    with sqlite3.connect(tmp_path / "agent.sqlite3") as conn:
+        conn.execute(
+            "UPDATE proactive_delivery_embeddings SET created_at = ? WHERE delivery_id = ?",
+            ((utc_now() - timedelta(days=7)).isoformat(), delivery_id),
+        )
     channel = FakeChannel()
     candidate = _candidate(
         "drift",
@@ -189,7 +202,7 @@ async def test_proactive_drops_recent_similar_topic_delivery(tmp_path: Path) -> 
         novelty=1.0,
         user_fit=1.0,
     )
-    loop = _loop(tmp_path, store, channel)
+    loop = _loop(tmp_path, store, channel, embedding_provider=FakeEmbeddingProvider())
 
     assert await loop._has_recent_similar_delivery(candidate, utc_now()) is True
     sent = await loop._deliver_best_candidate([candidate])
@@ -199,6 +212,42 @@ async def test_proactive_drops_recent_similar_topic_delivery(tmp_path: Path) -> 
     with sqlite3.connect(tmp_path / "agent.sqlite3") as conn:
         row = conn.execute("SELECT drop_reason FROM proactive_candidates ORDER BY id DESC LIMIT 1").fetchone()
     assert row == ("recent_topic_duplicate",)
+
+
+@pytest.mark.asyncio
+async def test_proactive_prunes_delivery_embeddings_after_retention(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    previous = "鸣潮旧消息"
+    delivery_id = await store.add_proactive_delivery("chat-1", previous, "drift")
+    await store.add_proactive_delivery_embedding(delivery_id, "chat-1", "drift", previous, [1.0, 0.0])
+    with sqlite3.connect(tmp_path / "agent.sqlite3") as conn:
+        conn.execute(
+            "UPDATE proactive_delivery_embeddings SET created_at = ? WHERE delivery_id = ?",
+            ((utc_now() - timedelta(days=31)).isoformat(), delivery_id),
+        )
+    channel = FakeChannel()
+    candidate = _candidate("drift", "drift-new", "鸣潮新消息", priority=1.0, confidence=1.0, novelty=1.0, user_fit=1.0)
+    loop = _loop(tmp_path, store, channel, embedding_provider=FakeEmbeddingProvider())
+
+    assert await loop._has_recent_similar_delivery(candidate, utc_now()) is False
+    with sqlite3.connect(tmp_path / "agent.sqlite3") as conn:
+        count = conn.execute("SELECT COUNT(*) FROM proactive_delivery_embeddings").fetchone()[0]
+    assert count == 0
+
+
+@pytest.mark.asyncio
+async def test_proactive_saves_delivery_embedding_after_send(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    channel = FakeChannel()
+    candidate = _candidate("drift", "drift-embed", "鸣潮有一个新消息", priority=1.0, confidence=1.0, novelty=1.0, user_fit=1.0)
+    loop = _loop(tmp_path, store, channel, embedding_provider=FakeEmbeddingProvider())
+
+    sent = await loop._deliver_best_candidate([candidate])
+    rows = await store.list_proactive_delivery_embeddings("chat-1")
+
+    assert sent is True
+    assert len(rows) == 1
+    assert rows[0]["embedding"] == [1.0, 0.0]
 
 
 @pytest.mark.asyncio

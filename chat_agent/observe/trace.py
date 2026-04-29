@@ -1,7 +1,8 @@
-"""运行观测与 trace 写入辅助。
+"""运行观测与被动消息 trace 写入辅助。
 
-业务模块在每轮被动回复、proactive tick、MCP 调用后把摘要写进 SQLite。
-这里保留轻量封装，避免 AgentLoop/ProactiveLoop 直接拼观察表字段。
+项目的观测数据包含几类表：被动回复写入 message_trace，主动循环写入
+proactive_tick_log/proactive_deliveries，MCP 调用写入 mcp_tool_log。
+本模块里的 TraceRecorder 目前只封装被动回复 trace，避免 AgentLoop 直接拼 message_trace 字段。
 """
 
 from __future__ import annotations
@@ -10,9 +11,10 @@ from chat_agent.memory.store import SQLiteStore
 
 
 class TraceRecorder:
-    """观测记录器。
+    """被动回复 trace 记录器。
 
-    该类是 AgentLoop 写 trace 的薄封装，目的是让业务层不直接关心 message_trace 表结构。
+    该类是 AgentLoop 写 message_trace 的薄封装，目的是让业务层不直接关心表结构。
+    主动消息由 ProactiveLoop 直接写 proactive_tick_log/proactive_deliveries。
     未来如果要把 trace 同步到文件、OpenTelemetry 或其他可观测系统，可以从这里扩展。
     """
 

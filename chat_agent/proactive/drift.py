@@ -101,7 +101,6 @@ class DriftManager:
         self.skills_loader = skills_loader
         self.tools = tools
         self.max_iterations = max_iterations
-        self._last_tool_evidence: dict[str, Any] = {}
 
     def load_tasks(self) -> list[DriftTask]:
         """加载当前可用 drift 任务。"""
@@ -207,7 +206,6 @@ class DriftManager:
                 return DriftResult(ran=False, reason="llm_error")
 
             candidate_meta, artifact = self._parse_output(task, output)
-            candidate_meta = self._apply_evidence_policy(candidate_meta, artifact)
             output_path = self._write_output(task, artifact)
             await self.store.add_drift_run(task.id, task.title, artifact, output_path=str(output_path), error=None)
             await self.store.update_drift_task_state(
@@ -250,17 +248,10 @@ class DriftManager:
 
     async def _run_task(self, messages: list[dict[str, Any]]) -> str:
         """执行 drift LLM 调用。"""
-        self._last_tool_evidence = {
-            "search_succeeded": False,
-            "fetch_succeeded": False,
-            "search_failed": False,
-            "search_empty": False,
-            "search_blocked": False,
-        }
         if not self.tools:
             result = await self.provider.chat(messages)
             return result.content if result.ok else ""
-        tools = _DriftToolRegistry(self.tools, self._last_tool_evidence)
+        tools = _DriftToolRegistry(self.tools)
         inbound = InboundMessage(
             channel="proactive",
             chat_id=self.target_chat_id or "drift",
@@ -334,37 +325,11 @@ class DriftManager:
             first_line = next((line.strip() for line in artifact.splitlines() if line.strip()), task.title)
             candidate_meta["body"] = first_line[:120]
         candidate_meta["shareable"] = _coerce_bool(candidate_meta.get("shareable", False), default=False)
-        if candidate_meta["shareable"] and _looks_stale_for_proactive(f"{candidate_meta.get('title', '')}\n{candidate_meta.get('body', '')}"):
-            candidate_meta["shareable"] = False
-            candidate_meta["priority"] = min(_coerce_score(candidate_meta.get("priority", 0.45), default=0.45), 0.25)
-            candidate_meta["confidence"] = min(_coerce_score(candidate_meta.get("confidence", 0.55), default=0.55), 0.35)
         candidate_meta["priority"] = _coerce_score(candidate_meta.get("priority", 0.45), default=0.45)
         candidate_meta["confidence"] = _coerce_score(candidate_meta.get("confidence", 0.55), default=0.55)
         candidate_meta["novelty"] = _coerce_score(candidate_meta.get("novelty", 0.35), default=0.35)
         candidate_meta["user_fit"] = _coerce_score(candidate_meta.get("user_fit", 0.7), default=0.7)
         return candidate_meta, artifact
-
-    def _apply_evidence_policy(self, candidate_meta: dict[str, Any], artifact: str) -> dict[str, Any]:
-        """缺少实时证据时，禁止把时效类 drift 结果直接主动发给用户。"""
-        if not _coerce_bool(candidate_meta.get("shareable", False), default=False):
-            return candidate_meta
-        text = f"{candidate_meta.get('title', '')}\n{candidate_meta.get('body', '')}\n{artifact}"
-        if not _looks_time_sensitive_for_proactive(text):
-            return candidate_meta
-        evidence = self._last_tool_evidence or {}
-        has_evidence = bool(evidence.get("search_succeeded") or evidence.get("fetch_succeeded"))
-        if has_evidence:
-            return candidate_meta
-        candidate_meta = dict(candidate_meta)
-        candidate_meta["shareable"] = False
-        candidate_meta["priority"] = min(_coerce_score(candidate_meta.get("priority", 0.45), default=0.45), 0.25)
-        candidate_meta["confidence"] = min(_coerce_score(candidate_meta.get("confidence", 0.55), default=0.55), 0.35)
-        logger.info(
-            "Drift candidate withheld because time-sensitive evidence is missing or degraded title=%r evidence=%s",
-            candidate_meta.get("title", ""),
-            evidence,
-        )
-        return candidate_meta
 
     def _write_output(self, task: DriftTask, content: str) -> Path:
         """把 drift 结果写入 Markdown 文件。"""
@@ -467,9 +432,8 @@ def _clamp_score(value: float, default: float) -> float:
 class _DriftToolRegistry:
     """给 drift 工具调用加一层轻量时效保护。"""
 
-    def __init__(self, inner: ToolRegistry, evidence: dict[str, Any] | None = None) -> None:
+    def __init__(self, inner: ToolRegistry) -> None:
         self.inner = inner
-        self.evidence = evidence if evidence is not None else {}
 
     def get_schema(self, names: list[str] | None = None) -> list[dict[str, Any]]:
         return self.inner.get_schema(names)
@@ -504,43 +468,11 @@ class _DriftToolRegistry:
     async def execute(self, name: str, args: dict[str, Any], message: InboundMessage) -> str:
         stale_reason = _stale_search_query_reason(name, args)
         if stale_reason:
-            self.evidence["search_blocked"] = True
             return stale_reason
-        result = await self.inner.execute(name, args, message)
-        self._record_tool_result(name, result)
-        return result
+        return await self.inner.execute(name, args, message)
 
     async def call(self, name: str, arguments: dict[str, Any], message: InboundMessage) -> str:
         return await self.execute(name, arguments, message)
-
-    def _record_tool_result(self, name: str, result: str) -> None:
-        lowered = name.lower()
-        if lowered == "tool_search":
-            return
-        is_search = "search" in lowered
-        is_fetch = "fetch" in lowered or "web_content" in lowered or "rss_get_content" in lowered
-        if is_search:
-            try:
-                payload = json.loads(result)
-            except json.JSONDecodeError:
-                if "失败" in result or "failed" in result.lower():
-                    self.evidence["search_failed"] = True
-                elif result.strip():
-                    self.evidence["search_succeeded"] = True
-                return
-            if payload.get("degraded") or payload.get("error"):
-                self.evidence["search_failed"] = True
-                return
-            rows = payload.get("results") if isinstance(payload, dict) else None
-            if isinstance(rows, list) and rows:
-                self.evidence["search_succeeded"] = True
-            elif isinstance(rows, list):
-                self.evidence["search_empty"] = True
-            return
-        if is_fetch:
-            if result.strip() and "失败" not in result and "failed" not in result.lower():
-                self.evidence["fetch_succeeded"] = True
-
 
 def _stale_search_query_reason(tool_name: str, args: dict[str, Any], now: datetime | None = None) -> str:
     """识别 drift 中明显旧年份的搜索查询。"""
@@ -562,150 +494,8 @@ def _stale_search_query_reason(tool_name: str, args: dict[str, Any], now: dateti
 
 
 def _drift_dedupe_key(task_id: str, title: str, body: str) -> str:
-    """生成对措辞变化不敏感的 drift 去重 key。"""
-    title_text = str(title or "").strip()
-    source_text = title_text if len(title_text) >= 4 else body
-    topic_text = _normalize_drift_topic(source_text)
-    digest = hashlib.sha1(topic_text.encode("utf-8")).hexdigest()[:16]
+    """生成 drift 候选自身的稳定去重 key。"""
+    source_text = "\n".join(part.strip() for part in (task_id, title, body) if str(part or "").strip())
+    normalized = re.sub(r"\s+", " ", source_text.lower()).strip()
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:16]
     return f"drift:{digest}"
-
-
-def _normalize_drift_topic(text: str) -> str:
-    """把主动消息规整成偏主题的文本，减少重复改写绕过去重。"""
-    normalized = str(text or "").lower()
-    normalized = re.sub(r"https?://\S+", " ", normalized)
-    versions = [f"version:{item}" for item in re.findall(r"(?<!\d)(\d+(?:\.\d+)+)(?!\d)", normalized)]
-    normalized = re.sub(r"[0-9]+[多余几]?抽|[0-9]+连|[0-9]+星|[0-9]+号|[0-9]+日|[0-9]+月|[0-9]+年", " ", normalized)
-    normalized = re.sub(r"[0-9]+(?:\.[0-9]+)?", " ", normalized)
-    normalized = re.sub(r"[，。！？、；：,.!?;:（）()【】\[\]「」『』“”\"'~～—_\\/\s]+", " ", normalized)
-    stop_words = (
-        "刚看到",
-        "刚刷到",
-        "刚注意到",
-        "顺手",
-        "等等",
-        "嘿",
-        "诶",
-        "话说",
-        "你",
-        "我",
-        "啦",
-        "了",
-        "呀",
-        "吗",
-        "打算",
-        "关注",
-        "哪个",
-        "感觉",
-        "就要",
-        "而且",
-        "还是",
-        "好像",
-        "挺大的",
-        "啥的",
-        "明天",
-        "今天",
-        "昨天",
-        "最近",
-        "准备",
-        "轻量",
-        "草稿",
-        "提醒",
-        "版本",
-        "更新",
-        "上线",
-        "开服",
-        "新角色",
-        "新地图",
-        "活动",
-        "兑换码",
-        "福利",
-        "庆典",
-        "庆",
-        "跟进",
-    )
-    for word in stop_words:
-        normalized = normalized.replace(word, " ")
-    tokens: list[str] = list(versions)
-    for raw_token in normalized.split():
-        token = raw_token.strip()
-        anniversaries = re.findall(r"[一二三四五六七八九十0-9]+周年", token)
-        tokens.extend(anniversaries)
-        for anniversary in anniversaries:
-            token = token.replace(anniversary, " ")
-        tokens.extend(part for part in token.split() if len(part) >= 2)
-    tokens = [token for token in tokens if len(token) >= 2]
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for token in sorted(tokens):
-        if token in seen:
-            continue
-        seen.add(token)
-        deduped.append(token)
-    return " ".join(deduped[:16]) or "empty"
-
-
-def _looks_time_sensitive_for_proactive(text: str) -> bool:
-    """识别需要实时来源支撑的主动分享内容。"""
-    if not text.strip():
-        return False
-    markers = (
-        "最新",
-        "刚看到",
-        "刚刷到",
-        "明天",
-        "今天",
-        "本周",
-        "本月",
-        "近30天",
-        "新闻",
-        "版本",
-        "更新",
-        "上线",
-        "开服",
-        "活动",
-        "发布",
-        "发布日期",
-        "直播",
-        "兑换码",
-        "福利",
-        "天气",
-        "价格",
-        "涨跌",
-        "二周年",
-        "周年",
-    )
-    return any(marker in text for marker in markers)
-
-
-def _looks_stale_for_proactive(text: str, now: datetime | None = None) -> bool:
-    """粗略识别不适合主动推送的过期时效内容。"""
-    current = now or utc_now()
-    if not text.strip():
-        return False
-    stale_years = {str(year) for year in range(2000, current.year)}
-    stale_markers = (
-        "已经开了",
-        "已经上线",
-        "已上线",
-        "已开启",
-        "已经结束",
-        "已结束",
-        "去年",
-        "过期",
-    )
-    if any(year in text for year in stale_years) and any(marker in text for marker in stale_markers):
-        return True
-    old_event_markers = (
-        "版本安排",
-        "版本更新",
-        "新版本",
-        "活动",
-        "发布日期",
-        "更新",
-    )
-    if any(marker in text for marker in old_event_markers):
-        dated_months = [int(month) for month in re.findall(r"(?<!\d)(1[0-2]|[1-9])月(?:\d{1,2}[号日])?", text)]
-        if dated_months and all(month < current.month for month in dated_months):
-            return True
-    return False

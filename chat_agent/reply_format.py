@@ -1,7 +1,7 @@
-"""Telegram 回复文本格式化。
+"""统一回复文本格式化。
 
 模型输出通常包含 Markdown、编号列表或引用说明；本模块负责做轻量清理，
-让 Telegram 中展示更舒适，同时避免改变回答本身的事实内容。
+让各消息渠道中展示更舒适，同时避免改变回答本身的事实内容。
 """
 
 from __future__ import annotations
@@ -10,7 +10,7 @@ import re
 
 
 def format_reply(text: str) -> str:
-    """统一整理发送给 Telegram 的回复文本。
+    """统一整理发送给用户的回复文本。
 
     参数:
         text: LLM 或直接规则生成的原始回复。
@@ -53,14 +53,14 @@ def _normalize_spacing(text: str) -> str:
 
 
 def _normalize_markdown(text: str) -> str:
-    """移除 Telegram 普通文本中容易显得杂乱的 Markdown 强调和标题符号。"""
+    """移除普通文本消息中容易显得杂乱的 Markdown 强调和标题符号。"""
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
     text = re.sub(r"^#{1,6}\s*", "", text, flags=re.MULTILINE)
     return text
 
 
 def _normalize_list_spacing(text: str) -> str:
-    """整理列表回复的空行，避免 Telegram 中挤成一团或空行过多。"""
+    """整理列表回复的空行，避免在聊天窗口中挤成一团或空行过多。"""
     lines = [line.rstrip() for line in text.split("\n")]
     compact: list[str] = []
     previous_blank = False

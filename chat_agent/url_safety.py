@@ -1,4 +1,4 @@
-"""Public web URL validation helpers."""
+"""公网 Web URL 校验辅助。"""
 
 from __future__ import annotations
 
@@ -7,11 +7,11 @@ from urllib.parse import urlparse
 
 
 class URLSafetyError(ValueError):
-    """Raised when a URL is not safe for outbound web fetching."""
+    """URL 不适合对外抓取时抛出的异常。"""
 
 
 def ensure_public_http_url(url: str) -> str:
-    """Validate that a URL targets a public http/https endpoint."""
+    """校验 URL 是否指向公网 http/https 地址。"""
     text = str(url or "").strip()
     if not text:
         raise URLSafetyError("url is required")

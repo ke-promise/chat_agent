@@ -105,6 +105,47 @@ def test_skills_loader_extracts_trigger_reasons(tmp_path: Path) -> None:
     assert triggered == [{"name": "weather", "reason": "trigger: 下雨"}]
 
 
+def test_skills_loader_parses_crlf_front_matter(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    path = workspace / "weather" / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "---\r\n"
+        "name: weather\r\n"
+        "description: CRLF skill\r\n"
+        'metadata: {"chat_agent":{"always":false,"triggers":["雨"],"requires":{"bins":[],"env":[],"tools":[]}}}\r\n'
+        "---\r\n\r\n"
+        "body\r\n",
+        encoding="utf-8",
+    )
+    loader = SkillsLoader(workspace=workspace)
+
+    skills = loader.list_skills()
+
+    assert skills[0]["name"] == "weather"
+    assert skills[0]["description"] == "CRLF skill"
+
+
+def test_write_workspace_skill_sanitizes_front_matter_description(tmp_path: Path) -> None:
+    loader = SkillsLoader(workspace=tmp_path / "workspace")
+
+    path = loader.write_workspace_skill("safe-skill", "first line\n---\nmetadata: {}", "body")
+    text = path.read_text(encoding="utf-8")
+
+    assert "description: first line - - - metadata: {}" in text
+    assert text.count("---") == 2
+
+
+def test_skills_summary_respects_tiny_catalog_limit(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    _write_skill(workspace, "weather", "查询天气", "body")
+    loader = SkillsLoader(workspace=workspace, max_catalog_chars=5)
+
+    summary = loader.build_skills_summary()
+
+    assert len(summary) <= 5
+
+
 def test_always_skill_is_detected(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     _write_skill(

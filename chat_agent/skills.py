@@ -1,13 +1,15 @@
-"""Akashic 风格 SKILL.md 技能说明书系统。
+"""SKILL.md 技能说明书系统。
 
 skills 与 tools 不同：tools 是 Agent 能执行的动作，skills 是 Agent 做事前阅读的 SOP。
-本模块负责扫描内置 skills、workspace skills、drift skills，解析 front matter，
-检查依赖可用性，并为 ContextBuilder 提供 catalog 和 active skill 正文。
+本模块负责扫描一个 workspace skills 目录和可选内置目录，解析简易 front matter，
+检查依赖可用性，并为 ContextBuilder 或 drift 任务提供 catalog 和 skill 正文。
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import os
 import re
 import shutil
 from dataclasses import dataclass, field
@@ -16,6 +18,7 @@ from typing import Any
 
 
 SKILL_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -82,7 +85,7 @@ class SkillsLoader:
         """
         self.workspace = Path(workspace)
         self.builtin_skills_dir = Path(builtin_skills_dir) if builtin_skills_dir else None
-        self.max_catalog_chars = max_catalog_chars
+        self.max_catalog_chars = max(0, int(max_catalog_chars))
 
     def list_skills(self, filter_unavailable: bool = True, available_tools: set[str] | None = None) -> list[dict[str, Any]]:
         """列出所有已发现的 skill。
@@ -178,7 +181,10 @@ class SkillsLoader:
         lines.append("</skills>")
         summary = "\n".join(lines)
         if len(summary) > self.max_catalog_chars:
-            return summary[: self.max_catalog_chars - 20] + "\n<!-- truncated -->"
+            marker = "\n<!-- truncated -->"
+            if self.max_catalog_chars <= len(marker):
+                return marker[: self.max_catalog_chars]
+            return summary[: self.max_catalog_chars - len(marker)] + marker
         return summary
 
     def extract_triggered_skills(self, text: str, available_tools: set[str] | None = None) -> list[dict[str, str]]:
@@ -250,7 +256,7 @@ class SkillsLoader:
         content = (
             "---\n"
             f"name: {name}\n"
-            f"description: {description.strip()}\n"
+            f"description: {_front_matter_scalar(description)}\n"
             f"metadata: {json.dumps(metadata, ensure_ascii=False)}\n"
             "---\n\n"
             f"{body.strip()}\n"
@@ -310,6 +316,7 @@ class SkillsLoader:
                 self._apply_requirements(record, available_tools=available_tools)
                 records[name] = record
             except Exception:
+                logger.warning("Failed to load skill file: %s", path, exc_info=True)
                 continue
         return records
 
@@ -320,8 +327,6 @@ class SkillsLoader:
         envs = requires.get("env", []) if isinstance(requires, dict) else []
         tools = requires.get("tools", []) if isinstance(requires, dict) else []
         record.missing_bins = [str(item) for item in bins if shutil.which(str(item)) is None]
-        import os
-
         record.missing_env = [str(item) for item in envs if not os.environ.get(str(item))]
         record.missing_tools = []
         if available_tools is not None:
@@ -341,16 +346,18 @@ def _parse_skill_file(path: Path) -> tuple[dict[str, Any], str]:
         path: SKILL.md 文件路径。
 
     返回:
-        (front, body)。metadata 字段按 JSON 解析，其他字段按简单 key:value 解析。
+        (front, body)。只支持单行 key:value；metadata 字段必须是单行 JSON。
     """
-    text = path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
     if not text.startswith("---\n"):
         return {"name": path.parent.name, "description": "", "metadata": {}}, text
-    end = text.find("\n---", 4)
-    if end < 0:
+    closing = re.search(r"\n---[ \t]*(?:\n|$)", text[4:])
+    if not closing:
         return {"name": path.parent.name, "description": "", "metadata": {}}, text
+    end = 4 + closing.start()
+    body_start = 4 + closing.end()
     raw_front = text[4:end].strip()
-    body = text[end + len("\n---") :].lstrip()
+    body = text[body_start:].lstrip()
     front: dict[str, Any] = {}
     for line in raw_front.splitlines():
         if ":" not in line:
@@ -376,11 +383,17 @@ def _format_front_matter(front: dict[str, Any]) -> str:
     lines = ["---"]
     for key in ("name", "description"):
         if key in front:
-            lines.append(f"{key}: {front[key]}")
+            lines.append(f"{key}: {_front_matter_scalar(front[key])}")
     metadata = front.get("metadata", {})
     lines.append(f"metadata: {json.dumps(metadata, ensure_ascii=False)}")
     lines.append("---")
     return "\n".join(lines)
+
+
+def _front_matter_scalar(value: Any) -> str:
+    """把 front matter 标量规整为安全单行文本。"""
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    return text.replace("---", "- - -")
 
 
 def _deep_get(data: dict[str, Any], path: list[str], default: Any = None) -> Any:

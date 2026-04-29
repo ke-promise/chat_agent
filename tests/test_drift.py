@@ -190,7 +190,7 @@ async def test_drift_manager_can_use_tool_loop(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_drift_manager_withholds_time_sensitive_candidate_when_search_degraded(tmp_path: Path) -> None:
+async def test_drift_manager_does_not_withhold_candidate_after_degraded_search(tmp_path: Path) -> None:
     tasks = tmp_path / "drift_tasks.json"
     tasks.write_text('{"tasks":[{"id":"x","title":"X","prompt":"search fresh game news","enabled":true}]}', encoding="utf-8")
     store = SQLiteStore(tmp_path / "agent.sqlite3")
@@ -225,7 +225,7 @@ async def test_drift_manager_withholds_time_sensitive_candidate_when_search_degr
     result = await manager.run_once()
 
     assert result.ran is True
-    assert result.candidate is None
+    assert result.candidate is not None
 
 
 class EnumMetaProvider:
@@ -272,7 +272,7 @@ class StaleShareProvider:
 
 
 @pytest.mark.asyncio
-async def test_drift_manager_rejects_stale_shareable_candidate(tmp_path: Path) -> None:
+async def test_drift_manager_keeps_shareable_candidate_without_post_parse_stale_filter(tmp_path: Path) -> None:
     tasks = tmp_path / "drift_tasks.json"
     tasks.write_text('{"tasks":[{"id":"x","title":"X","prompt":"share old version info","enabled":true}]}', encoding="utf-8")
     store = SQLiteStore(tmp_path / "agent.sqlite3")
@@ -289,7 +289,7 @@ async def test_drift_manager_rejects_stale_shareable_candidate(tmp_path: Path) -
     result = await manager.run_once()
 
     assert result.ran is True
-    assert result.candidate is None
+    assert result.candidate is not None
 
 
 def test_drift_manager_merges_skill_and_json_tasks(tmp_path: Path) -> None:
@@ -344,7 +344,7 @@ def test_drift_tool_registry_delegates_search(tmp_path: Path) -> None:
     assert [tool.name for tool in wrapped.search("discover")] == ["discover_tool"]
 
 
-def test_drift_dedupe_key_ignores_minor_rewording() -> None:
+def test_drift_dedupe_key_tracks_candidate_identity() -> None:
     first = _drift_dedupe_key(
         "interest_search",
         "鸣潮 3.3 二周年更新",
@@ -356,4 +356,4 @@ def test_drift_dedupe_key_ignores_minor_rewording() -> None:
         "嘿，刚看到鸣潮明天（4/30）上3.3版本啦，叫「自星海尽处回响」，二周年庆送五十多抽，还出了两个新五星——绯雪和达妮娅～",
     )
 
-    assert first == second
+    assert first != second

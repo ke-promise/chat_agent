@@ -551,6 +551,7 @@ async def run_bot(config: AppConfig) -> None:
         drift_manager=drift_manager,
         observe_store=observe_store,
         meme_service=meme_service,
+        embedding_provider=embedding_provider,
     )
 
     proactive_task: asyncio.Task | None = None

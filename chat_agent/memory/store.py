@@ -87,7 +87,7 @@ class SQLiteStore:
     """SQLite 持久化层。
 
     该类封装项目所有本地状态表，包括：
-    - chats: Telegram chat 与最后活跃时间。
+    - chats: 统一会话与最后活跃时间。
     - session_messages: 原始对话历史。
     - memories: 长期记忆。
     - reminders: 定时提醒。
@@ -96,7 +96,7 @@ class SQLiteStore:
 
     线程模型:
         sqlite3 是同步库，所有公开 async 方法都通过 asyncio.to_thread 执行阻塞 SQL，
-        避免卡住 Telegram 和 proactive 的事件循环。
+        避免卡住消息渠道和 proactive 的事件循环。
     """
 
     def __init__(self, database_path: str | Path) -> None:
@@ -246,6 +246,17 @@ class SQLiteStore:
                     source TEXT NOT NULL,
                     delivered_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS proactive_delivery_embeddings (
+                    delivery_id INTEGER PRIMARY KEY,
+                    chat_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    text_hash TEXT NOT NULL,
+                    embedding TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_proactive_delivery_embeddings_chat_id
+                    ON proactive_delivery_embeddings(chat_id, created_at);
 
                 CREATE TABLE IF NOT EXISTS proactive_candidates (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -397,11 +408,11 @@ class SQLiteStore:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     async def record_chat(self, chat_id: str, username: str | None) -> None:
-        """记录或更新一个 Telegram chat 的最后活跃时间。
+        """记录或更新一个统一会话的最后活跃时间。
 
         参数:
-            chat_id: Telegram chat id 字符串。
-            username: Telegram 用户名，可能为空。
+            chat_id: 通道层标准化后的会话 id。Telegram 使用 chat.id；QQ 会带场景前缀。
+            username: 通道侧用户名或展示名，可能为空。
         """
         def run() -> None:
             """执行相关逻辑。
@@ -426,7 +437,7 @@ class SQLiteStore:
         """读取指定 chat 的最后活跃时间。
 
         参数:
-            chat_id: Telegram chat id 字符串。
+            chat_id: 通道层标准化后的会话 id。
 
         返回:
             UTC datetime；没有记录时返回 None。
@@ -446,7 +457,7 @@ class SQLiteStore:
         """追加一条会话历史。
 
         参数:
-            chat_id: Telegram chat id。
+            chat_id: 通道层标准化后的会话 id。
             role: 消息角色，通常是 user、assistant、system 或 tool。
             content: 消息正文。附件会在上层转换为可读摘要后写入。
         """
@@ -467,7 +478,7 @@ class SQLiteStore:
         """读取指定 chat 最近的会话历史。
 
         参数:
-            chat_id: Telegram chat id。
+            chat_id: 通道层标准化后的会话 id。
             limit: 最多读取多少条，按时间从旧到新返回。
         """
         def run() -> list[dict[str, Any]]:
@@ -497,7 +508,7 @@ class SQLiteStore:
         """读取可整理的旧会话窗口，同时保留最新 keep_recent 条作为热上下文。
 
         参数:
-            chat_id: 当前 Telegram 会话 id。
+            chat_id: 当前通道会话 id。
             after_id: 已整理检查点，只读取 id 大于它的消息。
             keep_recent: 最新多少条消息暂不整理，避免刚发生的上下文被过早归档。
             limit: 单次最多整理多少条，避免一次 prompt 过长。
@@ -549,7 +560,7 @@ class SQLiteStore:
         """清理指定 chat 的旧会话历史，只保留最新 keep 条。
 
         参数:
-            chat_id: Telegram chat id。
+            chat_id: 通道层标准化后的会话 id。
             keep: 保留条数；小于等于 0 时不删除。
 
         返回:
@@ -598,7 +609,7 @@ class SQLiteStore:
         """新增或更新指定 chat 的近期上下文摘要。
 
         参数:
-            chat_id: Telegram chat id。
+            chat_id: 通道层标准化后的会话 id。
             summary: 摘要正文。
             message_count: 生成摘要时对应的 session message 总数。
         """
@@ -626,7 +637,7 @@ class SQLiteStore:
         """读取指定 chat 的用户画像。
 
         参数:
-            chat_id: Telegram chat id。
+            chat_id: 通道层标准化后的会话 id。
 
         返回:
             用户画像字典。没有画像或 JSON 损坏时返回空字典。
@@ -652,7 +663,7 @@ class SQLiteStore:
         """合并更新指定 chat 的用户画像。
 
         参数:
-            chat_id: Telegram chat id。
+            chat_id: 通道层标准化后的会话 id。
             updates: 要合并进画像的字段。None 值会被忽略，list 字段会去重合并。
 
         返回:
@@ -1957,26 +1968,101 @@ class SQLiteStore:
 
         await asyncio.to_thread(run)
 
-    async def add_proactive_delivery(self, chat_id: str, message: str, source: str) -> None:
+    async def add_proactive_delivery(self, chat_id: str, message: str, source: str) -> int:
         """记录一条已经主动发送给用户的消息。
 
         参数:
             chat_id: 目标 chat id。
             message: 已发送正文。
             source: 主动来源，例如 reminder、feed、drift、fallback。
+
+        返回:
+            proactive_deliveries 表自增 id。
         """
-        def run() -> None:
+        def run() -> int:
             """执行相关逻辑。
 
             返回:
                 返回与本函数处理结果对应的数据。"""
             with self._connect() as conn:
-                conn.execute(
+                cursor = conn.execute(
                     "INSERT INTO proactive_deliveries(chat_id, message, source, delivered_at) VALUES (?, ?, ?, ?)",
                     (chat_id, message, source, _utc_now_iso()),
                 )
+                return int(cursor.lastrowid)
+
+        return await asyncio.to_thread(run)
+
+    async def add_proactive_delivery_embedding(
+        self,
+        delivery_id: int,
+        chat_id: str,
+        source: str,
+        text: str,
+        embedding: list[float],
+    ) -> None:
+        """写入一条主动发送消息的 embedding，用于后续发送前语义去重。"""
+        vector_text = json.dumps([float(value) for value in embedding])
+        text_hash = _content_hash(text)
+
+        def run() -> None:
+            with self._connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO proactive_delivery_embeddings(delivery_id, chat_id, source, text_hash, embedding, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(delivery_id) DO UPDATE SET
+                        chat_id = excluded.chat_id,
+                        source = excluded.source,
+                        text_hash = excluded.text_hash,
+                        embedding = excluded.embedding,
+                        created_at = excluded.created_at
+                    """,
+                    (delivery_id, chat_id, source, text_hash, vector_text, _utc_now_iso()),
+                )
 
         await asyncio.to_thread(run)
+
+    async def list_proactive_delivery_embeddings(
+        self,
+        chat_id: str,
+        limit: int | None = None,
+        include_reminders: bool = False,
+    ) -> list[dict[str, Any]]:
+        """读取当前保留的主动发送消息 embedding，用于发送前语义去重。"""
+        if limit is not None:
+            limit = max(0, int(limit))
+            if limit <= 0:
+                return []
+
+        def run() -> list[dict[str, Any]]:
+            source_clause = "" if include_reminders else "AND source != 'reminder'"
+            limit_clause = "" if limit is None else "LIMIT ?"
+            params: tuple[Any, ...] = (chat_id,) if limit is None else (chat_id, limit)
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT delivery_id, chat_id, source, text_hash, embedding, created_at
+                    FROM proactive_delivery_embeddings
+                    WHERE chat_id = ? {source_clause}
+                    ORDER BY created_at DESC
+                    {limit_clause}
+                    """,
+                    params,
+                ).fetchall()
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                try:
+                    vector = json.loads(row["embedding"])
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(vector, list):
+                    item = dict(row)
+                    item["embedding"] = [float(value) for value in vector]
+                    result.append(item)
+            return result
+
+        return await asyncio.to_thread(run)
 
     async def count_non_reminder_proactive_deliveries_since(self, chat_id: str, since: datetime) -> int:
         """统计指定 chat 的非 reminder 主动发送次数。"""
@@ -2034,6 +2120,32 @@ class SQLiteStore:
                     (chat_id, _to_iso(since)),
                 ).fetchone()
             return int(row["count"])
+
+        return await asyncio.to_thread(run)
+
+    async def list_recent_proactive_delivery_embeddings(
+        self,
+        chat_id: str,
+        since: datetime,
+        limit: int = 16,
+        include_reminders: bool = False,
+    ) -> list[dict[str, Any]]:
+        """读取指定时间后的主动发送消息 embedding。"""
+        rows = await self.list_proactive_delivery_embeddings(chat_id, limit=None, include_reminders=include_reminders)
+        since_text = _to_iso(since)
+        filtered = [row for row in rows if str(row.get("created_at") or "") >= since_text]
+        return filtered[: max(0, int(limit))]
+
+    async def prune_proactive_delivery_embeddings_before(self, cutoff: datetime) -> int:
+        """删除早于 cutoff 的主动发送消息 embedding，避免语义去重表无限增长。"""
+
+        def run() -> int:
+            with self._connect() as conn:
+                cursor = conn.execute(
+                    "DELETE FROM proactive_delivery_embeddings WHERE created_at < ?",
+                    (_to_iso(cutoff),),
+                )
+                return int(cursor.rowcount)
 
         return await asyncio.to_thread(run)
 

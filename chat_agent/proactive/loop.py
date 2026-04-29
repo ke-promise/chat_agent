@@ -10,15 +10,23 @@ from datetime import datetime, time, timedelta
 from chat_agent.agent.provider import LLMProvider
 from chat_agent.config import DriftConfig, FallbackConfig, FeedConfig, ProactiveBudgetConfig
 from chat_agent.memes import MemeService
+from chat_agent.memory.embeddings import EmbeddingProvider
 from chat_agent.memory.interests import build_interest_watchlist, interest_match_score, parse_interest_watchlist_md
 from chat_agent.memory.store import SQLiteStore, utc_now
+from chat_agent.memory.vector_store import cosine_similarity
 from chat_agent.messages import OutboundAttachment, OutboundMessage
 from chat_agent.presence import PresenceTracker
-from chat_agent.proactive.drift import DriftManager, _normalize_drift_topic
+from chat_agent.proactive.drift import DriftManager
 from chat_agent.proactive.feed import ProactiveFeedManager
 from chat_agent.proactive.models import ProactiveCandidate
 
 logger = logging.getLogger(__name__)
+
+SEMANTIC_DUPLICATE_THRESHOLDS = {
+    "drift": 0.84,
+    "feed": 0.88,
+}
+PROACTIVE_DELIVERY_EMBEDDING_RETENTION_DAYS = 30
 
 
 class ProactiveLoop:
@@ -43,6 +51,7 @@ class ProactiveLoop:
         drift_manager: DriftManager | None = None,
         observe_store: SQLiteStore | None = None,
         meme_service: MemeService | None = None,
+        embedding_provider: EmbeddingProvider | None = None,
     ) -> None:
         """初始化 `ProactiveLoop` 实例。
 
@@ -64,6 +73,7 @@ class ProactiveLoop:
             drift_manager: 初始化 `ProactiveLoop` 时需要的 `drift_manager` 参数。
             observe_store: 初始化 `ProactiveLoop` 时需要的 `observe_store` 参数。
             meme_service: 初始化 `ProactiveLoop` 时需要的 `meme_service` 参数。
+            embedding_provider: 可选 embedding provider，用于主动消息发送前语义去重。
         """
         self.store = store
         self.channel = channel
@@ -94,6 +104,7 @@ class ProactiveLoop:
         self.drift_manager = drift_manager
         self.observe_store = observe_store or store
         self.meme_service = meme_service
+        self.embedding_provider = embedding_provider
         self._stopped = asyncio.Event()
 
     async def run(self) -> None:
@@ -338,7 +349,8 @@ class ProactiveLoop:
 
         text = await self._compose_candidate_message(winner)
         await self.channel.send(self._build_outbound_message(winner, text))
-        await self.store.add_proactive_delivery(self.target_chat_id, text, source=winner.source_type)
+        delivery_id = await self.store.add_proactive_delivery(self.target_chat_id, text, source=winner.source_type)
+        await self._embed_proactive_delivery(delivery_id, self.target_chat_id, winner.source_type, text)
         await self.store.mark_seen_item(winner.dedupe_key, winner.source_type, winner.title, winner.url)
         if winner.source_type == "feed" and self.feed_manager:
             await self.feed_manager.ack(winner)
@@ -517,26 +529,56 @@ class ProactiveLoop:
         return cap >= 0 and count >= cap
 
     async def _has_recent_similar_delivery(self, candidate: ProactiveCandidate, now: datetime) -> bool:
-        """避免同一主题在短时间内被不同措辞反复主动发送。"""
-        if candidate.source_type == "reminder":
+        """用 embedding 避免同一主题被不同措辞反复主动发送。"""
+        if candidate.source_type == "reminder" or not self.embedding_provider:
             return False
-        candidate_topic = _normalize_drift_topic(f"{candidate.title}\n{candidate.body}")
-        if candidate_topic == "empty":
+        threshold = SEMANTIC_DUPLICATE_THRESHOLDS.get(candidate.source_type)
+        if threshold is None:
             return False
-        cooldown_hours = 24 if candidate.source_type == "drift" else 12
-        rows = await self.store.list_recent_proactive_deliveries(
+        candidate_text = "\n".join(part.strip() for part in (candidate.title, candidate.body) if part.strip())
+        if not candidate_text:
+            return False
+        try:
+            candidate_embedding = await self.embedding_provider.embed(candidate_text)
+        except Exception:
+            logger.exception("Proactive semantic dedupe embedding failed candidate_id=%s", candidate.candidate_id)
+            return False
+        if not candidate_embedding:
+            return False
+        await self.store.prune_proactive_delivery_embeddings_before(
+            now - timedelta(days=PROACTIVE_DELIVERY_EMBEDDING_RETENTION_DAYS)
+        )
+        rows = await self.store.list_proactive_delivery_embeddings(
             self.target_chat_id,
-            now - timedelta(hours=cooldown_hours),
-            limit=16,
             include_reminders=False,
         )
         for row in rows:
-            previous_topic = _normalize_drift_topic(str(row.get("message") or ""))
-            if previous_topic == "empty":
-                continue
-            if _topic_similarity(candidate_topic, previous_topic) >= 0.62:
+            score = cosine_similarity(candidate_embedding, row["embedding"])
+            if score >= threshold:
+                logger.info(
+                    "Proactive semantic duplicate source=%s candidate_id=%s delivery_id=%s score=%.4f threshold=%.4f",
+                    candidate.source_type,
+                    candidate.candidate_id,
+                    row.get("delivery_id"),
+                    score,
+                    threshold,
+                )
                 return True
         return False
+
+    async def _embed_proactive_delivery(self, delivery_id: int, chat_id: str, source: str, text: str) -> None:
+        """为已发送主动消息保存 embedding，供后续语义去重使用。"""
+        if not self.embedding_provider or source == "reminder":
+            return
+        text = text.strip()
+        if not text:
+            return
+        try:
+            embedding = await self.embedding_provider.embed(text)
+            if embedding:
+                await self.store.add_proactive_delivery_embedding(delivery_id, chat_id, source, text, embedding)
+        except Exception:
+            logger.exception("Proactive delivery embedding failed delivery_id=%s", delivery_id)
 
     def _score_candidate(self, candidate: ProactiveCandidate) -> float:
         """计算评分候选项。
@@ -783,19 +825,3 @@ class ProactiveLoop:
                 content_count=content_count,
                 sent_count=sent_count,
             )
-
-
-def _topic_similarity(left: str, right: str) -> float:
-    """计算轻量主题相似度，供主动消息冷却使用。"""
-    left_tokens = {token for token in left.split() if token}
-    right_tokens = {token for token in right.split() if token}
-    if not left_tokens or not right_tokens:
-        return 0.0
-    if left_tokens == right_tokens:
-        return 1.0
-    overlap = left_tokens & right_tokens
-    if not overlap:
-        return 0.0
-    jaccard = len(overlap) / len(left_tokens | right_tokens)
-    coverage = len(overlap) / min(len(left_tokens), len(right_tokens))
-    return max(jaccard, coverage * 0.82)
