@@ -31,6 +31,7 @@ class SkillRecord:
         available: 依赖检查是否通过。
         missing_bins: 缺失的本机命令列表。
         missing_env: 缺失的环境变量列表。
+        missing_tools: 缺失的工具列表。
     """
 
     name: str
@@ -41,6 +42,7 @@ class SkillRecord:
     available: bool = True
     missing_bins: list[str] = field(default_factory=list)
     missing_env: list[str] = field(default_factory=list)
+    missing_tools: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         """把 SkillRecord 转换成可序列化字典，供命令、工具和测试使用。"""
@@ -53,6 +55,7 @@ class SkillRecord:
             "available": self.available,
             "missing_bins": self.missing_bins,
             "missing_env": self.missing_env,
+            "missing_tools": self.missing_tools,
         }
 
 
@@ -81,41 +84,44 @@ class SkillsLoader:
         self.builtin_skills_dir = Path(builtin_skills_dir) if builtin_skills_dir else None
         self.max_catalog_chars = max_catalog_chars
 
-    def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, Any]]:
+    def list_skills(self, filter_unavailable: bool = True, available_tools: set[str] | None = None) -> list[dict[str, Any]]:
         """列出所有已发现的 skill。
 
         参数:
             filter_unavailable: True 时过滤掉缺失 bin/env 依赖的 skill。
+            available_tools: 可选的已注册工具名集合；传入时也检查 requires.tools。
 
         返回:
             skill 字典列表，按名称排序。
         """
-        records = self._scan()
+        records = self._scan(available_tools=available_tools)
         if filter_unavailable:
             records = {name: record for name, record in records.items() if record.available}
         return [record.as_dict() for record in sorted(records.values(), key=lambda item: item.name)]
 
-    def load_skill(self, name: str) -> str | None:
+    def load_skill(self, name: str, available_tools: set[str] | None = None) -> str | None:
         """读取指定 skill 的完整 SKILL.md 正文。
 
         参数:
             name: skill 名称。
+            available_tools: 可选的已注册工具名集合；传入时也检查 requires.tools。
 
         返回:
             文件完整内容；名称非法、未找到或依赖不可用时返回 None。
         """
         if not is_valid_skill_name(name):
             return None
-        record = self._scan().get(name)
+        record = self._scan(available_tools=available_tools).get(name)
         if not record or not record.available:
             return None
         return record.path.read_text(encoding="utf-8")
 
-    def load_skills_for_context(self, names: list[str]) -> str:
+    def load_skills_for_context(self, names: list[str], available_tools: set[str] | None = None) -> str:
         """读取多个 skill 并包装成 prompt 中的 XML 块。
 
         参数:
             names: 需要注入完整说明的 skill 名称列表。
+            available_tools: 可选的已注册工具名集合；传入时也检查 requires.tools。
 
         返回:
             多个 <skill name="...">...</skill> 块拼接后的字符串。
@@ -126,35 +132,36 @@ class SkillsLoader:
             if name in seen:
                 continue
             seen.add(name)
-            body = self.load_skill(name)
+            body = self.load_skill(name, available_tools=available_tools)
             if body:
                 blocks.append(f'<skill name="{name}">\n{body}\n</skill>')
         return "\n\n".join(blocks)
 
-    def get_skill_metadata(self, name: str) -> dict[str, Any] | None:
+    def get_skill_metadata(self, name: str, available_tools: set[str] | None = None) -> dict[str, Any] | None:
         """返回指定 skill 的 metadata。"""
-        record = self._scan().get(name)
+        record = self._scan(available_tools=available_tools).get(name)
         return record.metadata if record else None
 
-    def get_always_skills(self) -> list[str]:
+    def get_always_skills(self, available_tools: set[str] | None = None) -> list[str]:
         """返回 metadata.chat_agent.always=true 且可用的 skill 名称。"""
         result: list[str] = []
-        for record in self._scan().values():
+        for record in self._scan(available_tools=available_tools).values():
             if record.available and bool(_deep_get(record.metadata, ["chat_agent", "always"], False)):
                 result.append(record.name)
         return sorted(result)
 
-    def build_skills_summary(self) -> str:
+    def build_skills_summary(self, available_tools: set[str] | None = None) -> str:
         """构建给模型看的 skills catalog 摘要。
 
         返回:
             XML 风格文本，包含名称、描述、路径、可用状态和缺失依赖。只注入摘要，不注入所有
             完整 SKILL.md，以避免 prompt 膨胀。
         """
-        records = sorted(self._scan().values(), key=lambda item: (item.source != "workspace", item.name))
+        records = sorted(self._scan(available_tools=available_tools).values(), key=lambda item: (item.source != "workspace", item.name))
         lines = ["<skills>"]
         for record in records:
-            missing = ",".join(record.missing_bins + record.missing_env)
+            missing = ",".join(record.missing_bins + record.missing_env + record.missing_tools)
+            triggers = _skill_triggers(record)
             lines.extend(
                 [
                     f'  <skill available="{str(record.available).lower()}" source="{record.source}">',
@@ -163,6 +170,8 @@ class SkillsLoader:
                     f"    <location>{_xml_escape(_display_path(record.path))}</location>",
                 ]
             )
+            if triggers:
+                lines.append(f"    <triggers>{_xml_escape(','.join(triggers[:8]))}</triggers>")
             if missing:
                 lines.append(f"    <missing>{_xml_escape(missing)}</missing>")
             lines.append("  </skill>")
@@ -172,22 +181,39 @@ class SkillsLoader:
             return summary[: self.max_catalog_chars - 20] + "\n<!-- truncated -->"
         return summary
 
-    def extract_triggered_skill_names(self, text: str) -> list[str]:
+    def extract_triggered_skills(self, text: str, available_tools: set[str] | None = None) -> list[dict[str, str]]:
+        """从用户文本中提取触发的 skill，并返回触发原因。
+
+        触发方式:
+            @skill-name、skill:skill-name、文本中独立出现 skill name，或命中 metadata.chat_agent.triggers。
+        """
+        text_lower = text.lower()
+        reasons: dict[str, str] = {}
+        records = self._scan(available_tools=available_tools)
+        for match in re.finditer(r"(?:@|skill:)([a-z0-9][a-z0-9-]{0,63})", text_lower):
+            name = match.group(1)
+            record = records.get(name)
+            if record and record.available:
+                reasons.setdefault(name, f"mention: {name}")
+        for name, record in records.items():
+            if not record.available:
+                continue
+            if re.search(rf"(?<![a-z0-9-]){re.escape(name)}(?![a-z0-9-])", text_lower):
+                reasons.setdefault(name, f"name: {name}")
+            for trigger in _skill_triggers(record):
+                trigger_lower = trigger.lower()
+                if trigger_lower and trigger_lower in text_lower:
+                    reasons.setdefault(name, f"trigger: {trigger}")
+                    break
+        return [{"name": name, "reason": reasons[name]} for name in sorted(reasons)]
+
+    def extract_triggered_skill_names(self, text: str, available_tools: set[str] | None = None) -> list[str]:
         """从用户文本中提取显式触发的 skill 名称。
 
         触发方式:
-            @skill-name、skill:skill-name，或文本中独立出现 skill name。
+            @skill-name、skill:skill-name、文本中独立出现 skill name，或命中 metadata.chat_agent.triggers。
         """
-        text_lower = text.lower()
-        names: list[str] = []
-        records = self._scan()
-        for match in re.finditer(r"(?:@|skill:)([a-z0-9][a-z0-9-]{0,63})", text_lower):
-            if match.group(1) in records:
-                names.append(match.group(1))
-        for name in records:
-            if re.search(rf"(?<![a-z0-9-]){re.escape(name)}(?![a-z0-9-])", text_lower):
-                names.append(name)
-        return sorted(set(names))
+        return [item["name"] for item in self.extract_triggered_skills(text, available_tools=available_tools)]
 
     def workspace_skill_path(self, name: str) -> Path:
         """计算 workspace 中某个 skill 的 SKILL.md 路径并做安全校验。
@@ -220,7 +246,7 @@ class SkillsLoader:
         """
         path = self.workspace_skill_path(name)
         path.parent.mkdir(parents=True, exist_ok=True)
-        metadata = {"chat_agent": {"always": bool(always), "requires": {"bins": [], "env": []}}}
+        metadata = {"chat_agent": {"always": bool(always), "drift": False, "triggers": [], "requires": {"bins": [], "env": [], "tools": []}}}
         content = (
             "---\n"
             f"name: {name}\n"
@@ -247,21 +273,22 @@ class SkillsLoader:
         path.write_text(content, encoding="utf-8")
         return path
 
-    def _scan(self) -> dict[str, SkillRecord]:
+    def _scan(self, available_tools: set[str] | None = None) -> dict[str, SkillRecord]:
         """扫描内置与 workspace skills，并应用 workspace 覆盖规则。"""
         records: dict[str, SkillRecord] = {}
         if self.builtin_skills_dir:
-            records.update(self._scan_dir(self.builtin_skills_dir, "builtin"))
+            records.update(self._scan_dir(self.builtin_skills_dir, "builtin", available_tools=available_tools))
         # 后扫描 workspace，让同名用户 skill 覆盖内置 skill。
-        records.update(self._scan_dir(self.workspace, "workspace"))
+        records.update(self._scan_dir(self.workspace, "workspace", available_tools=available_tools))
         return records
 
-    def _scan_dir(self, root: Path, source: str) -> dict[str, SkillRecord]:
+    def _scan_dir(self, root: Path, source: str, available_tools: set[str] | None = None) -> dict[str, SkillRecord]:
         """扫描单个 skills 根目录。
 
         参数:
             root: skills 根目录。
             source: 来源标记，通常是 builtin 或 workspace。
+            available_tools: 可选的已注册工具名集合；传入时也检查 requires.tools。
         """
         if not root.exists():
             return {}
@@ -280,22 +307,26 @@ class SkillsLoader:
                     source=source,
                     metadata=metadata,
                 )
-                self._apply_requirements(record)
+                self._apply_requirements(record, available_tools=available_tools)
                 records[name] = record
             except Exception:
                 continue
         return records
 
-    def _apply_requirements(self, record: SkillRecord) -> None:
+    def _apply_requirements(self, record: SkillRecord, available_tools: set[str] | None = None) -> None:
         """根据 metadata.chat_agent.requires 检查 skill 依赖。"""
         requires = _deep_get(record.metadata, ["chat_agent", "requires"], {}) or {}
         bins = requires.get("bins", []) if isinstance(requires, dict) else []
         envs = requires.get("env", []) if isinstance(requires, dict) else []
+        tools = requires.get("tools", []) if isinstance(requires, dict) else []
         record.missing_bins = [str(item) for item in bins if shutil.which(str(item)) is None]
         import os
 
         record.missing_env = [str(item) for item in envs if not os.environ.get(str(item))]
-        record.available = not record.missing_bins and not record.missing_env
+        record.missing_tools = []
+        if available_tools is not None:
+            record.missing_tools = [str(item) for item in tools if str(item) not in available_tools]
+        record.available = not record.missing_bins and not record.missing_env and not record.missing_tools
 
 
 def is_valid_skill_name(name: str) -> bool:
@@ -360,6 +391,14 @@ def _deep_get(data: dict[str, Any], path: list[str], default: Any = None) -> Any
             return default
         current = current[key]
     return current
+
+
+def _skill_triggers(record: SkillRecord) -> list[str]:
+    """读取 metadata.chat_agent.triggers 并规整成字符串列表。"""
+    triggers = _deep_get(record.metadata, ["chat_agent", "triggers"], []) or []
+    if not isinstance(triggers, list):
+        return []
+    return [str(item).strip() for item in triggers if str(item).strip()]
 
 
 def _xml_escape(value: str) -> str:

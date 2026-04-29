@@ -288,13 +288,14 @@ def build_default_registry(
         if not skills_loader:
             return "skills 还没启用，这个小抽屉暂时打不开。"
         include_unavailable = _as_bool(args.get("include_unavailable", False))
-        skills = skills_loader.list_skills(filter_unavailable=not include_unavailable)
+        available_tools = set(registry.tool_names())
+        skills = skills_loader.list_skills(filter_unavailable=not include_unavailable, available_tools=available_tools)
         if not skills:
             return "当前还没有可用 skill，小工具箱暂时空空的。"
         lines = []
         for item in skills:
             state = "available" if item["available"] else "unavailable"
-            missing = ",".join(item.get("missing_bins", []) + item.get("missing_env", []))
+            missing = ",".join(item.get("missing_bins", []) + item.get("missing_env", []) + item.get("missing_tools", []))
             suffix = f" missing={missing}" if missing else ""
             lines.append(f"- {item['name']} [{item['source']}, {state}]{suffix}: {item['description']}")
         return "\n".join(lines)
@@ -312,7 +313,7 @@ def build_default_registry(
         if not skills_loader:
             return "skills 还没启用，这个小抽屉暂时打不开。"
         name = str(args.get("name", "")).strip()
-        body = skills_loader.load_skill(name)
+        body = skills_loader.load_skill(name, available_tools=set(registry.tool_names()))
         return body if body else f"我翻了翻 skill 小抽屉，没有找到可用的：{name}"
 
     async def create_skill(_: ToolContext, args: dict[str, Any]) -> str:

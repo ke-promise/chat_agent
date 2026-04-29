@@ -1,7 +1,7 @@
 ---
 name: create-skill
 description: 创建或改写当前 chat_agent 项目的 SKILL.md。用户要求新增技能、适配旧技能、修改技能说明书时使用。
-metadata: {"chat_agent":{"always":false,"drift":false,"requires":{"bins":[],"env":[]}}}
+metadata: {"chat_agent":{"always":false,"drift":false,"triggers":["创建 skill","新增技能","修改技能说明书","SKILL.md"],"requires":{"bins":[],"env":[],"tools":[]}}}
 ---
 
 # 创建 Skill
@@ -23,7 +23,7 @@ skills/<skill-name>/SKILL.md             # 项目内置技能，随代码分发
 ---
 name: skill-name
 description: 一句话说明功能和触发场景，尽量包含用户可能说出的关键词。
-metadata: {"chat_agent":{"always":false,"drift":false,"requires":{"bins":[],"env":[]}}}
+metadata: {"chat_agent":{"always":false,"drift":false,"triggers":[],"requires":{"bins":[],"env":[],"tools":[]}}}
 ---
 
 # Skill 标题
@@ -36,8 +36,10 @@ metadata: {"chat_agent":{"always":false,"drift":false,"requires":{"bins":[],"env
 - `description`：用于 catalog 和触发判断，要具体。
 - `metadata.chat_agent.always`：为 true 时每轮完整注入 prompt，慎用。
 - `metadata.chat_agent.drift`：为 true 时可被空闲 drift 任务使用。
+- `metadata.chat_agent.triggers`：用户文本命中这些短语时会完整注入 skill。
 - `requires.bins`：依赖的本地命令，例如 `curl`、`npx.cmd`。
 - `requires.env`：依赖的环境变量，例如 `QWEN_API_KEY`。
+- `requires.tools`：依赖已注册工具，例如 `web_fetch`、`read_file`；不改变工具默认可见性。
 
 ## 创建流程
 
@@ -45,7 +47,7 @@ metadata: {"chat_agent":{"always":false,"drift":false,"requires":{"bins":[],"env
 2. 优先写入 `workspace/skills/<name>/SKILL.md`。
 3. 正文只写当前项目真的具备的能力：Telegram、ToolRegistry、MCP、memory、proactive、drift。
 4. 如果需要工具，先写明可用工具名，例如 `tool_search`、`read_skill`、`web_fetch`、`read_file`、`write_file`。
-5. 不要引用 Akashic 原项目路径、QQ、NapCat、多通道或不存在的函数名。
+5. 不要引用不存在的项目路径或不存在的函数名；当前项目确实支持 Telegram 与 QQ 官方 Bot。
 
 ## 写作原则
 

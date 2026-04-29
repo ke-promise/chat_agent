@@ -198,6 +198,10 @@ class ToolRegistry:
         """返回当前默认可见工具名列表。"""
         return self.default_visible_names()
 
+    def tool_names(self) -> list[str]:
+        """返回当前已注册的全部工具名。"""
+        return list(self._tools.keys())
+
     async def execute(self, name: str, args: dict[str, Any], message: InboundMessage) -> str:
         """执行指定工具并返回字符串结果。
 

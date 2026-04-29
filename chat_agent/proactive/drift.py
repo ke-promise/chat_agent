@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+import hashlib
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +19,7 @@ from chat_agent.messages import InboundMessage
 from chat_agent.proactive.models import ProactiveCandidate
 from chat_agent.reasoner import Reasoner
 from chat_agent.skills import SkillsLoader
-from chat_agent.tools.registry import ToolRegistry
+from chat_agent.tools.registry import Tool, ToolContext, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -99,19 +101,18 @@ class DriftManager:
         self.skills_loader = skills_loader
         self.tools = tools
         self.max_iterations = max_iterations
+        self._last_tool_evidence: dict[str, Any] = {}
 
     def load_tasks(self) -> list[DriftTask]:
         """加载当前可用 drift 任务。"""
         skill_tasks = self.load_skill_tasks()
-        if skill_tasks:
-            return skill_tasks
+        json_tasks: list[DriftTask] = []
         if not self.tasks_path.exists():
             logger.warning("Drift tasks config not found: %s", self.tasks_path)
-            return []
+            return skill_tasks
         data = json.loads(self.tasks_path.read_text(encoding="utf-8"))
-        tasks: list[DriftTask] = []
         for item in data.get("tasks", []):
-            tasks.append(
+            json_tasks.append(
                 DriftTask(
                     id=str(item.get("id", "")),
                     title=str(item.get("title", "")),
@@ -119,7 +120,7 @@ class DriftManager:
                     enabled=bool(item.get("enabled", True)),
                 )
             )
-        return [task for task in tasks if task.enabled and task.id and task.prompt]
+        return [task for task in [*skill_tasks, *json_tasks] if task.enabled and task.id and task.prompt]
 
     def load_skill_tasks(self) -> list[DriftTask]:
         """从 SkillsLoader 中提取适合 drift 的任务。"""
@@ -170,12 +171,16 @@ class DriftManager:
 
         started_at = utc_now()
         try:
+            now_text = started_at.astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+            current_year = started_at.year
             context = await self._build_context()
             messages = [
                 {
                     "role": "system",
                     "content": (
                         "你是个人智能体的后台 drift 执行器。"
+                        f"当前日期时间是 {now_text}，当前年份是 {current_year}。"
+                        f"除非用户明确要求回顾历史，否则搜索查询不得使用早于 {current_year} 年的年份。"
                         "请完成一个后台准备任务，输出必须包含两个部分。"
                         "第一部分是一个 JSON 对象，字段固定为 shareable,title,body,priority,confidence,novelty,user_fit。"
                         "shareable 默认应为 false，只有在内容高价值、高置信且适合直接主动发给用户时才设为 true。"
@@ -184,6 +189,12 @@ class DriftManager:
                         "第二部分是可保存的中文 Markdown 归档正文。"
                         "最终格式必须严格如下：<candidate>{JSON}</candidate>\\n<artifact>Markdown 正文</artifact>。"
                         "如果任务需要实时信息，先用 tool_search 查找并解锁 MCP 工具，再调用相关工具。"
+                        "涉及新闻、版本更新、活动、发布日期、价格、天气等时效内容时，必须优先找最近 30 天内的来源，"
+                        f"搜索词要包含 {current_year} 或“最新/今天/本周/本月”等时间限定，并在归档中记录来源日期。"
+                        "如果只找到旧资料、发布日期不明或结果彼此矛盾，candidate.shareable 必须为 false，只能写后台归档。"
+                        "不要把已经过去的发布日期、旧版本更新或过期活动包装成“刚看到的新发现”。"
+                        "搜索方向不能只看用户兴趣本身，也要结合近期上下文、待提醒、用户可能受益的实用信息和明确的新变化；"
+                        "但只有与用户有实际关系且足够新鲜可靠时才允许主动发。"
                         "不要编造你没有从上下文或工具里获得的事实。"
                     ),
                 },
@@ -196,6 +207,7 @@ class DriftManager:
                 return DriftResult(ran=False, reason="llm_error")
 
             candidate_meta, artifact = self._parse_output(task, output)
+            candidate_meta = self._apply_evidence_policy(candidate_meta, artifact)
             output_path = self._write_output(task, artifact)
             await self.store.add_drift_run(task.id, task.title, artifact, output_path=str(output_path), error=None)
             await self.store.update_drift_task_state(
@@ -238,9 +250,17 @@ class DriftManager:
 
     async def _run_task(self, messages: list[dict[str, Any]]) -> str:
         """执行 drift LLM 调用。"""
+        self._last_tool_evidence = {
+            "search_succeeded": False,
+            "fetch_succeeded": False,
+            "search_failed": False,
+            "search_empty": False,
+            "search_blocked": False,
+        }
         if not self.tools:
             result = await self.provider.chat(messages)
             return result.content if result.ok else ""
+        tools = _DriftToolRegistry(self.tools, self._last_tool_evidence)
         inbound = InboundMessage(
             channel="proactive",
             chat_id=self.target_chat_id or "drift",
@@ -249,7 +269,7 @@ class DriftManager:
         )
         reasoner = Reasoner(
             provider=self.provider,
-            tools=self.tools,
+            tools=tools,
             max_iterations=self.max_iterations,
             tool_loop_enabled=True,
         )
@@ -259,11 +279,12 @@ class DriftManager:
     async def _build_context(self) -> str:
         """为 drift 任务构造轻量上下文。"""
         chat_id = self.target_chat_id
+        now_text = utc_now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
         summary = await self.store.get_summary(chat_id) if chat_id else None
         user_profile = await self.store.get_user_profile(chat_id) if chat_id else {}
         memories = await self.store.list_recent_memories(chat_id, limit=8) if chat_id else []
         reminders = await self.store.list_pending_reminders(chat_id, limit=8) if chat_id else []
-        lines: list[str] = []
+        lines: list[str] = [f"当前时间：{now_text}"]
         if summary:
             lines.append(f"近期摘要：{summary}")
         interest_hints = build_interest_watchlist(user_profile, memories)
@@ -313,11 +334,37 @@ class DriftManager:
             first_line = next((line.strip() for line in artifact.splitlines() if line.strip()), task.title)
             candidate_meta["body"] = first_line[:120]
         candidate_meta["shareable"] = _coerce_bool(candidate_meta.get("shareable", False), default=False)
+        if candidate_meta["shareable"] and _looks_stale_for_proactive(f"{candidate_meta.get('title', '')}\n{candidate_meta.get('body', '')}"):
+            candidate_meta["shareable"] = False
+            candidate_meta["priority"] = min(_coerce_score(candidate_meta.get("priority", 0.45), default=0.45), 0.25)
+            candidate_meta["confidence"] = min(_coerce_score(candidate_meta.get("confidence", 0.55), default=0.55), 0.35)
         candidate_meta["priority"] = _coerce_score(candidate_meta.get("priority", 0.45), default=0.45)
         candidate_meta["confidence"] = _coerce_score(candidate_meta.get("confidence", 0.55), default=0.55)
         candidate_meta["novelty"] = _coerce_score(candidate_meta.get("novelty", 0.35), default=0.35)
         candidate_meta["user_fit"] = _coerce_score(candidate_meta.get("user_fit", 0.7), default=0.7)
         return candidate_meta, artifact
+
+    def _apply_evidence_policy(self, candidate_meta: dict[str, Any], artifact: str) -> dict[str, Any]:
+        """缺少实时证据时，禁止把时效类 drift 结果直接主动发给用户。"""
+        if not _coerce_bool(candidate_meta.get("shareable", False), default=False):
+            return candidate_meta
+        text = f"{candidate_meta.get('title', '')}\n{candidate_meta.get('body', '')}\n{artifact}"
+        if not _looks_time_sensitive_for_proactive(text):
+            return candidate_meta
+        evidence = self._last_tool_evidence or {}
+        has_evidence = bool(evidence.get("search_succeeded") or evidence.get("fetch_succeeded"))
+        if has_evidence:
+            return candidate_meta
+        candidate_meta = dict(candidate_meta)
+        candidate_meta["shareable"] = False
+        candidate_meta["priority"] = min(_coerce_score(candidate_meta.get("priority", 0.45), default=0.45), 0.25)
+        candidate_meta["confidence"] = min(_coerce_score(candidate_meta.get("confidence", 0.55), default=0.55), 0.35)
+        logger.info(
+            "Drift candidate withheld because time-sensitive evidence is missing or degraded title=%r evidence=%s",
+            candidate_meta.get("title", ""),
+            evidence,
+        )
+        return candidate_meta
 
     def _write_output(self, task: DriftTask, content: str) -> Path:
         """把 drift 结果写入 Markdown 文件。"""
@@ -335,6 +382,7 @@ class DriftManager:
         now = utc_now()
         title = str(meta.get("title") or task.title)
         body = str(meta.get("body") or title).strip()
+        dedupe_key = _drift_dedupe_key(task.id, title, body)
         return ProactiveCandidate(
             candidate_id=f"drift:{task.id}:{now.strftime('%Y%m%d%H%M%S')}",
             source_type="drift",
@@ -348,7 +396,7 @@ class DriftManager:
             shareable=True,
             created_at=now,
             expires_at=now + timedelta(hours=24),
-            dedupe_key=f"drift:{task.id}:{body[:80].strip()}",
+            dedupe_key=dedupe_key,
             artifact_path=str(output_path),
         )
 
@@ -414,3 +462,250 @@ def _clamp_score(value: float, default: float) -> float:
     if value != value:
         return default
     return max(0.0, min(1.0, value))
+
+
+class _DriftToolRegistry:
+    """给 drift 工具调用加一层轻量时效保护。"""
+
+    def __init__(self, inner: ToolRegistry, evidence: dict[str, Any] | None = None) -> None:
+        self.inner = inner
+        self.evidence = evidence if evidence is not None else {}
+
+    def get_schema(self, names: list[str] | None = None) -> list[dict[str, Any]]:
+        return self.inner.get_schema(names)
+
+    def resolve_visible_names(self, session_tool_names=None) -> list[str]:
+        return self.inner.resolve_visible_names(session_tool_names)
+
+    def default_visible_names(self) -> list[str]:
+        return self.inner.default_visible_names()
+
+    def get_tool(self, name: str) -> Tool | None:
+        return self.inner.get_tool(name)
+
+    def get(self, name: str) -> Tool | None:
+        return self.inner.get(name)
+
+    def search(self, query: str, limit: int = 8, exposures: set[str] | None = None) -> list[Tool]:
+        return self.inner.search(query, limit=limit, exposures=exposures)
+
+    def tool_names(self) -> list[str]:
+        return self.inner.tool_names()
+
+    def list_descriptions(self, only_visible: bool = False, names: list[str] | None = None) -> str:
+        return self.inner.list_descriptions(only_visible=only_visible, names=names)
+
+    def visible_count(self) -> int:
+        return self.inner.visible_count()
+
+    def visible_names(self) -> list[str]:
+        return self.inner.visible_names()
+
+    async def execute(self, name: str, args: dict[str, Any], message: InboundMessage) -> str:
+        stale_reason = _stale_search_query_reason(name, args)
+        if stale_reason:
+            self.evidence["search_blocked"] = True
+            return stale_reason
+        result = await self.inner.execute(name, args, message)
+        self._record_tool_result(name, result)
+        return result
+
+    async def call(self, name: str, arguments: dict[str, Any], message: InboundMessage) -> str:
+        return await self.execute(name, arguments, message)
+
+    def _record_tool_result(self, name: str, result: str) -> None:
+        lowered = name.lower()
+        if lowered == "tool_search":
+            return
+        is_search = "search" in lowered
+        is_fetch = "fetch" in lowered or "web_content" in lowered or "rss_get_content" in lowered
+        if is_search:
+            try:
+                payload = json.loads(result)
+            except json.JSONDecodeError:
+                if "失败" in result or "failed" in result.lower():
+                    self.evidence["search_failed"] = True
+                elif result.strip():
+                    self.evidence["search_succeeded"] = True
+                return
+            if payload.get("degraded") or payload.get("error"):
+                self.evidence["search_failed"] = True
+                return
+            rows = payload.get("results") if isinstance(payload, dict) else None
+            if isinstance(rows, list) and rows:
+                self.evidence["search_succeeded"] = True
+            elif isinstance(rows, list):
+                self.evidence["search_empty"] = True
+            return
+        if is_fetch:
+            if result.strip() and "失败" not in result and "failed" not in result.lower():
+                self.evidence["fetch_succeeded"] = True
+
+
+def _stale_search_query_reason(tool_name: str, args: dict[str, Any], now: datetime | None = None) -> str:
+    """识别 drift 中明显旧年份的搜索查询。"""
+    lowered_name = tool_name.lower()
+    if "search" not in lowered_name:
+        return ""
+    query = str(args.get("query") or args.get("q") or "").strip()
+    if not query:
+        return ""
+    current_year = (now or utc_now()).year
+    years = [int(match) for match in re.findall(r"(?<!\d)(20\d{2})(?!\d)", query)]
+    stale_years = sorted({year for year in years if year < current_year})
+    if not stale_years:
+        return ""
+    return (
+        f"drift 搜索被拦截：查询 {query!r} 包含旧年份 {', '.join(str(year) for year in stale_years)}。"
+        f"当前年份是 {current_year}；请改用 {current_year}、最新、今天、本周、本月或近30天等时间限定重新搜索。"
+    )
+
+
+def _drift_dedupe_key(task_id: str, title: str, body: str) -> str:
+    """生成对措辞变化不敏感的 drift 去重 key。"""
+    title_text = str(title or "").strip()
+    source_text = title_text if len(title_text) >= 4 else body
+    topic_text = _normalize_drift_topic(source_text)
+    digest = hashlib.sha1(topic_text.encode("utf-8")).hexdigest()[:16]
+    return f"drift:{digest}"
+
+
+def _normalize_drift_topic(text: str) -> str:
+    """把主动消息规整成偏主题的文本，减少重复改写绕过去重。"""
+    normalized = str(text or "").lower()
+    normalized = re.sub(r"https?://\S+", " ", normalized)
+    versions = [f"version:{item}" for item in re.findall(r"(?<!\d)(\d+(?:\.\d+)+)(?!\d)", normalized)]
+    normalized = re.sub(r"[0-9]+[多余几]?抽|[0-9]+连|[0-9]+星|[0-9]+号|[0-9]+日|[0-9]+月|[0-9]+年", " ", normalized)
+    normalized = re.sub(r"[0-9]+(?:\.[0-9]+)?", " ", normalized)
+    normalized = re.sub(r"[，。！？、；：,.!?;:（）()【】\[\]「」『』“”\"'~～—_\\/\s]+", " ", normalized)
+    stop_words = (
+        "刚看到",
+        "刚刷到",
+        "刚注意到",
+        "顺手",
+        "等等",
+        "嘿",
+        "诶",
+        "话说",
+        "你",
+        "我",
+        "啦",
+        "了",
+        "呀",
+        "吗",
+        "打算",
+        "关注",
+        "哪个",
+        "感觉",
+        "就要",
+        "而且",
+        "还是",
+        "好像",
+        "挺大的",
+        "啥的",
+        "明天",
+        "今天",
+        "昨天",
+        "最近",
+        "准备",
+        "轻量",
+        "草稿",
+        "提醒",
+        "版本",
+        "更新",
+        "上线",
+        "开服",
+        "新角色",
+        "新地图",
+        "活动",
+        "兑换码",
+        "福利",
+        "庆典",
+        "庆",
+        "跟进",
+    )
+    for word in stop_words:
+        normalized = normalized.replace(word, " ")
+    tokens: list[str] = list(versions)
+    for raw_token in normalized.split():
+        token = raw_token.strip()
+        anniversaries = re.findall(r"[一二三四五六七八九十0-9]+周年", token)
+        tokens.extend(anniversaries)
+        for anniversary in anniversaries:
+            token = token.replace(anniversary, " ")
+        tokens.extend(part for part in token.split() if len(part) >= 2)
+    tokens = [token for token in tokens if len(token) >= 2]
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for token in sorted(tokens):
+        if token in seen:
+            continue
+        seen.add(token)
+        deduped.append(token)
+    return " ".join(deduped[:16]) or "empty"
+
+
+def _looks_time_sensitive_for_proactive(text: str) -> bool:
+    """识别需要实时来源支撑的主动分享内容。"""
+    if not text.strip():
+        return False
+    markers = (
+        "最新",
+        "刚看到",
+        "刚刷到",
+        "明天",
+        "今天",
+        "本周",
+        "本月",
+        "近30天",
+        "新闻",
+        "版本",
+        "更新",
+        "上线",
+        "开服",
+        "活动",
+        "发布",
+        "发布日期",
+        "直播",
+        "兑换码",
+        "福利",
+        "天气",
+        "价格",
+        "涨跌",
+        "二周年",
+        "周年",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _looks_stale_for_proactive(text: str, now: datetime | None = None) -> bool:
+    """粗略识别不适合主动推送的过期时效内容。"""
+    current = now or utc_now()
+    if not text.strip():
+        return False
+    stale_years = {str(year) for year in range(2000, current.year)}
+    stale_markers = (
+        "已经开了",
+        "已经上线",
+        "已上线",
+        "已开启",
+        "已经结束",
+        "已结束",
+        "去年",
+        "过期",
+    )
+    if any(year in text for year in stale_years) and any(marker in text for marker in stale_markers):
+        return True
+    old_event_markers = (
+        "版本安排",
+        "版本更新",
+        "新版本",
+        "活动",
+        "发布日期",
+        "更新",
+    )
+    if any(marker in text for marker in old_event_markers):
+        dated_months = [int(month) for month in re.findall(r"(?<!\d)(1[0-2]|[1-9])月(?:\d{1,2}[号日])?", text)]
+        if dated_months and all(month < current.month for month in dated_months):
+            return True
+    return False

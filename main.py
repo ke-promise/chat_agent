@@ -394,6 +394,7 @@ async def run_bot(config: AppConfig) -> None:
             api_key=config.embedding.api_key,
             base_url=config.embedding.base_url,
             timeout_seconds=config.embedding.timeout_seconds,
+            dimension=config.embedding.dimension,
         )
         if config.embedding.enabled and config.embedding.model and config.embedding.api_key and config.embedding.base_url
         else None

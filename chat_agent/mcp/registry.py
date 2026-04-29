@@ -554,6 +554,14 @@ def _classify_stderr_log(server_name: str, text: str):
             return logger.info
         if "error handling web-search tool call" in lowered and "http 202" in lowered:
             return logger.info
+        if lowered.startswith("at ") and (
+            "package/src/utils/search.js" in lowered
+            or "package/src/tools/searchtool.js" in lowered
+            or "package/bin/cli.js" in lowered
+            or "@modelcontextprotocol/sdk" in lowered
+            or "node:internal/process/task_queues" in lowered
+        ):
+            return logger.info
     return logger.warning
 
 

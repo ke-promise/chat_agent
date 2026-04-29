@@ -35,7 +35,7 @@ class EmbeddingProvider:
         这个 provider 只负责把文本变成向量；向量保存和检索由 vector_store.py 负责。
     """
 
-    def __init__(self, model: str, api_key: str, base_url: str, timeout_seconds: float = 30) -> None:
+    def __init__(self, model: str, api_key: str, base_url: str, timeout_seconds: float = 30, dimension: int | None = None) -> None:
         """初始化 OpenAI-compatible embedding 客户端。
 
         参数:
@@ -43,8 +43,10 @@ class EmbeddingProvider:
             api_key: API key，来自配置或环境变量，不能写死在代码中。
             base_url: OpenAI-compatible 服务地址。
             timeout_seconds: 单次 embedding 请求超时时间。
+            dimension: 可选向量维度；百炼 text-embedding-v3/v4 支持 dimensions 参数。
         """
         self.model = model
+        self.dimension = dimension
         self.client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
@@ -65,7 +67,10 @@ class EmbeddingProvider:
         if not text:
             return None
         try:
-            response = await self.client.embeddings.create(model=self.model, input=text)
+            kwargs: dict[str, Any] = {"model": self.model, "input": text, "encoding_format": "float"}
+            if self.dimension:
+                kwargs["dimensions"] = self.dimension
+            response = await self.client.embeddings.create(**kwargs)
             raw_embedding: Any = response.data[0].embedding
             return [float(value) for value in raw_embedding]
         except AuthenticationError:

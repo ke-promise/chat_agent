@@ -2037,6 +2037,35 @@ class SQLiteStore:
 
         return await asyncio.to_thread(run)
 
+    async def list_recent_proactive_deliveries(
+        self,
+        chat_id: str,
+        since: datetime,
+        limit: int = 12,
+        include_reminders: bool = False,
+    ) -> list[dict[str, Any]]:
+        """读取指定 chat 最近主动发送正文，用于语义去重和冷却。"""
+        limit = max(0, int(limit))
+        if limit <= 0:
+            return []
+
+        def run() -> list[dict[str, Any]]:
+            source_clause = "" if include_reminders else "AND source != 'reminder'"
+            with self._connect() as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT id, chat_id, message, source, delivered_at
+                    FROM proactive_deliveries
+                    WHERE chat_id = ? AND delivered_at >= ? {source_clause}
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (chat_id, _to_iso(since), limit),
+                ).fetchall()
+            return [dict(row) for row in rows]
+
+        return await asyncio.to_thread(run)
+
     async def last_proactive_delivery_at(self, chat_id: str) -> datetime | None:
         """读取指定 chat 最近一次主动发送时间。"""
         def run() -> datetime | None:

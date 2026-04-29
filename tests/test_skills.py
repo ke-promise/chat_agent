@@ -17,7 +17,7 @@ from chat_agent.tools.builtin import build_default_registry
 def _write_skill(root: Path, name: str, description: str, body: str, metadata: str | None = None) -> Path:
     path = root / name / "SKILL.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    metadata_text = metadata or '{"chat_agent":{"always":false,"requires":{"bins":[],"env":[]}}}'
+    metadata_text = metadata or '{"chat_agent":{"always":false,"drift":false,"triggers":[],"requires":{"bins":[],"env":[],"tools":[]}}}'
     path.write_text(
         "\n".join(
             [
@@ -70,6 +70,41 @@ def test_skills_loader_marks_missing_requirements(tmp_path: Path, monkeypatch: p
     assert loader.list_skills(filter_unavailable=True) == []
 
 
+def test_skills_loader_marks_missing_tool_requirements(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    _write_skill(
+        workspace,
+        "needs-tool",
+        "needs tool",
+        "body",
+        '{"chat_agent":{"always":false,"triggers":[],"requires":{"bins":[],"env":[],"tools":["missing_tool"]}}}',
+    )
+
+    loader = SkillsLoader(workspace=workspace)
+    all_skills = loader.list_skills(filter_unavailable=False, available_tools={"present_tool"})
+
+    assert all_skills[0]["available"] is False
+    assert all_skills[0]["missing_tools"] == ["missing_tool"]
+    assert loader.list_skills(filter_unavailable=True, available_tools={"present_tool"}) == []
+    assert loader.list_skills(filter_unavailable=True) != []
+
+
+def test_skills_loader_extracts_trigger_reasons(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    _write_skill(
+        workspace,
+        "weather",
+        "查询天气",
+        "body",
+        '{"chat_agent":{"always":false,"triggers":["下雨","温度"],"requires":{"bins":[],"env":[],"tools":[]}}}',
+    )
+    loader = SkillsLoader(workspace=workspace)
+
+    triggered = loader.extract_triggered_skills("明天会下雨吗")
+
+    assert triggered == [{"name": "weather", "reason": "trigger: 下雨"}]
+
+
 def test_always_skill_is_detected(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     _write_skill(
@@ -87,7 +122,13 @@ def test_always_skill_is_detected(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_context_builder_injects_skills_catalog_and_active_skill(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
-    _write_skill(workspace, "weather", "查询天气", "# Weather\nUse weather steps.")
+    _write_skill(
+        workspace,
+        "weather",
+        "查询天气",
+        "# Weather\nUse weather steps.",
+        '{"chat_agent":{"always":false,"triggers":["天气"],"requires":{"bins":[],"env":[],"tools":[]}}}',
+    )
     loader = SkillsLoader(workspace=workspace)
     store = SQLiteStore(tmp_path / "agent.sqlite3")
     registry = build_default_registry(store, skills_loader=loader)
@@ -97,8 +138,10 @@ async def test_context_builder_injects_skills_catalog_and_active_skill(tmp_path:
     system_text = "\n".join(str(item["content"]) for item in bundle.messages if item["role"] == "system")
 
     assert "<skills>" in system_text
+    assert "<triggers>" in system_text
     assert '<skill name="weather">' in system_text
-    assert bundle.trace["active_skills"] == ["weather"]
+    assert bundle.trace["active_skills"] == [{"name": "weather", "reason": "mention: weather"}]
+    assert bundle.trace["active_skill_names"] == ["weather"]
 
 
 @pytest.mark.asyncio
@@ -118,6 +161,9 @@ async def test_skill_tools_read_create_and_reject_invalid_name(tmp_path: Path) -
 
     assert "已创建 workspace skill" in created
     assert "# My Skill" in read
+    assert '"drift": false' in read
+    assert '"triggers": []' in read
+    assert '"tools": []' in read
     assert "只允许小写字母" in rejected
 
 
@@ -135,7 +181,13 @@ class FakeProvider:
 @pytest.mark.asyncio
 async def test_drift_uses_drift_skill_before_json_tasks(tmp_path: Path) -> None:
     drift_skills = tmp_path / "drift_skills"
-    _write_skill(drift_skills, "review", "review skill", "Drift Skill Body")
+    _write_skill(
+        drift_skills,
+        "review",
+        "review skill",
+        "Drift Skill Body",
+        '{"chat_agent":{"always":false,"drift":true,"triggers":[],"requires":{"bins":[],"env":[],"tools":[]}}}',
+    )
     tasks = tmp_path / "drift_tasks.json"
     tasks.write_text('{"tasks":[{"id":"fallback","title":"Fallback","prompt":"fallback body","enabled":true}]}', encoding="utf-8")
     store = SQLiteStore(tmp_path / "agent.sqlite3")

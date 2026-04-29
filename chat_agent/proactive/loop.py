@@ -14,7 +14,7 @@ from chat_agent.memory.interests import build_interest_watchlist, interest_match
 from chat_agent.memory.store import SQLiteStore, utc_now
 from chat_agent.messages import OutboundAttachment, OutboundMessage
 from chat_agent.presence import PresenceTracker
-from chat_agent.proactive.drift import DriftManager
+from chat_agent.proactive.drift import DriftManager, _normalize_drift_topic
 from chat_agent.proactive.feed import ProactiveFeedManager
 from chat_agent.proactive.models import ProactiveCandidate
 
@@ -481,6 +481,8 @@ class ProactiveLoop:
             return "expired"
         if await self.store.has_seen_item(candidate.dedupe_key):
             return "duplicate"
+        if await self._has_recent_similar_delivery(candidate, now):
+            return "recent_topic_duplicate"
         if busy:
             return "busy"
         if quiet:
@@ -513,6 +515,28 @@ class ProactiveLoop:
         }
         cap = cap_map.get(source_type, self.budget.daily_max)
         return cap >= 0 and count >= cap
+
+    async def _has_recent_similar_delivery(self, candidate: ProactiveCandidate, now: datetime) -> bool:
+        """避免同一主题在短时间内被不同措辞反复主动发送。"""
+        if candidate.source_type == "reminder":
+            return False
+        candidate_topic = _normalize_drift_topic(f"{candidate.title}\n{candidate.body}")
+        if candidate_topic == "empty":
+            return False
+        cooldown_hours = 24 if candidate.source_type == "drift" else 12
+        rows = await self.store.list_recent_proactive_deliveries(
+            self.target_chat_id,
+            now - timedelta(hours=cooldown_hours),
+            limit=16,
+            include_reminders=False,
+        )
+        for row in rows:
+            previous_topic = _normalize_drift_topic(str(row.get("message") or ""))
+            if previous_topic == "empty":
+                continue
+            if _topic_similarity(candidate_topic, previous_topic) >= 0.62:
+                return True
+        return False
 
     def _score_candidate(self, candidate: ProactiveCandidate) -> float:
         """计算评分候选项。
@@ -759,3 +783,19 @@ class ProactiveLoop:
                 content_count=content_count,
                 sent_count=sent_count,
             )
+
+
+def _topic_similarity(left: str, right: str) -> float:
+    """计算轻量主题相似度，供主动消息冷却使用。"""
+    left_tokens = {token for token in left.split() if token}
+    right_tokens = {token for token in right.split() if token}
+    if not left_tokens or not right_tokens:
+        return 0.0
+    if left_tokens == right_tokens:
+        return 1.0
+    overlap = left_tokens & right_tokens
+    if not overlap:
+        return 0.0
+    jaccard = len(overlap) / len(left_tokens | right_tokens)
+    coverage = len(overlap) / min(len(left_tokens), len(right_tokens))
+    return max(jaccard, coverage * 0.82)

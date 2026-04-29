@@ -31,10 +31,12 @@ workspace/drift/skills/<name>/SKILL.md # 空闲 drift 专用技能
 推荐格式：
 
 ```yaml
-metadata: {"chat_agent":{"always":false,"drift":false,"requires":{"bins":[],"env":[]}}}
+metadata: {"chat_agent":{"always":false,"drift":false,"triggers":[],"requires":{"bins":[],"env":[],"tools":[]}}}
 ```
 
 - `always=true`：每轮注入完整 skill，慎用。
 - `drift=true`：可被空闲 DriftManager 作为后台任务执行。
+- `triggers`：显式触发词，命中用户文本时注入完整 skill。
 - `requires.bins`：依赖本地命令。
 - `requires.env`：依赖环境变量。
+- `requires.tools`：依赖已注册工具；只检查工具是否存在，不改变工具可见性。

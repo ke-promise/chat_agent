@@ -118,13 +118,20 @@ class ContextBuilder:
         skills_catalog = ""
         active_skills = ""
         active_skill_names: list[str] = []
+        active_skill_details: list[dict[str, str]] = []
         if self.skills_loader:
-            active_skill_names = self.skills_loader.get_always_skills()
-            active_skill_names.extend(self.skills_loader.extract_triggered_skill_names(inbound.content))
-            active_skill_names = sorted(set(active_skill_names))
+            available_tools = set(self.tools.tool_names())
+            active_skill_details = [{"name": name, "reason": "always"} for name in self.skills_loader.get_always_skills(available_tools=available_tools)]
+            active_names = {item["name"] for item in active_skill_details}
+            for item in self.skills_loader.extract_triggered_skills(inbound.content, available_tools=available_tools):
+                if item["name"] not in active_names:
+                    active_skill_details.append(item)
+                    active_names.add(item["name"])
+            active_skill_details = sorted(active_skill_details, key=lambda item: item["name"])
+            active_skill_names = [item["name"] for item in active_skill_details]
             if self.inject_skills_catalog:
-                skills_catalog = self.skills_loader.build_skills_summary()
-            active_skills = self.skills_loader.load_skills_for_context(active_skill_names)
+                skills_catalog = self.skills_loader.build_skills_summary(available_tools=available_tools)
+            active_skills = self.skills_loader.load_skills_for_context(active_skill_names, available_tools=available_tools)
 
         context_lines = [f"当前时间：{now}"]
         if summary:
@@ -176,7 +183,8 @@ class ContextBuilder:
             "attachments_count": len(inbound.attachments),
             "hyde_used": bool(retriever_trace.get("hyde_used")),
             "skills_catalog_chars": len(skills_catalog),
-            "active_skills": active_skill_names,
+            "active_skills": active_skill_details,
+            "active_skill_names": active_skill_names,
             "active_skills_chars": len(active_skills),
             "memory_file_chars": 0,
             "candidates_considered": int(retriever_trace.get("candidates_considered", 0)),

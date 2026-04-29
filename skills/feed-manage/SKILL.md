@@ -1,12 +1,12 @@
 ---
 name: feed-manage
 description: 管理和查询主动信息源、RSS、网页 feed、proactive source。用户问订阅了什么、有哪些动态、信息来源、RSS 配置时使用。
-metadata: {"chat_agent":{"always":false,"drift":false,"requires":{"bins":[],"env":[]}}}
+metadata: {"chat_agent":{"always":false,"drift":false,"triggers":["信息源","订阅","RSS","rss","feed","主动推送来源","监控什么","有哪些动态"],"requires":{"bins":[],"env":[],"tools":["tool_search","read_file"]}}}
 ---
 
 # Feed 管理
 
-当前项目通过 MCP 和 `workspace/proactive_sources.json` 接入主动信息源。不要使用 Akashic 原项目的 `mcp_feed__*` 工具名。
+当前项目通过 MCP 和 `workspace/proactive_sources.json` 接入主动信息源。不要使用 Akashic 原项目的 `mcp_feed__*` 工具名，也不要假设存在 `web_poll_feeds` 这类固定工具名。
 
 ## 触发场景
 
@@ -17,15 +17,14 @@ metadata: {"chat_agent":{"always":false,"drift":false,"requires":{"bins":[],"env
 ## 工具策略
 
 1. 先调用 `tool_search`，搜索关键词可以是 `feed`、`rss`、`proactive`、`source`。
-2. 如果已连接 MCP，可能看到类似工具：
-   - `web_poll_feeds`
-   - `web_get_proactive_events`
-   - `web_ack_events`
+2. 如果已连接 MCP，当前项目常见工具名可能是：
+   - `feed_bridge_poll_feeds`
+   - `feed_bridge_get_proactive_events`
+   - `feed_bridge_ack_events`
    - `rss_get_content`
-3. 如果只是查看配置，可用文件工具读取：
-   - `read_file("proactive_sources.json")`
-   - `read_file("mcp_servers.json")`
-4. 如果要修改配置，使用 `write_file` 更新 workspace 内对应 JSON，并提醒用户需要重启或执行 `/mcp_reload`。
+3. 具体工具名以 `tool_search` 返回和当前可见工具为准，不要硬编码不存在的工具。
+4. 默认文件工具只能访问 `[tools].file_workspace`，通常是 `workspace/files`；因此运行中的 Agent 通常不能直接读取或修改 `workspace/proactive_sources.json` 和 `workspace/mcp_servers.json`。
+5. 如果文件工作区已被配置为允许访问对应 JSON，才使用 `read_file` / `write_file` 查看或修改；否则给用户明确的配置片段和需要修改的文件路径。
 
 ## 查询最近内容
 
@@ -35,11 +34,11 @@ metadata: {"chat_agent":{"always":false,"drift":false,"requires":{"bins":[],"env
 
 ```text
 tool_search(query="feed rss proactive source")
-web_poll_feeds()
-web_get_proactive_events()
+feed_bridge_poll_feeds()
+feed_bridge_get_proactive_events(channel="content")
 ```
 
-具体工具名以当前 `tool_search` 返回为准。
+如果 `feed_bridge_get_proactive_events` 返回空，说明当前可能没有新内容；不等于配置错误。
 
 ## 管理 source
 
@@ -49,7 +48,7 @@ web_get_proactive_events()
 {
   "sources": [
     {
-      "server": "web",
+      "server": "feed_bridge",
       "channel": "content",
       "poll_tool": "poll_feeds",
       "get_tool": "get_proactive_events",
@@ -60,8 +59,15 @@ web_get_proactive_events()
 }
 ```
 
+常见搭配：
+
+- RSS/Atom：优先复用 `feed_bridge`。
+- 第三方 `rss` MCP：可能使用 `rss_get_content`，通常没有 ACK。
+- 自定义网页/API：先参考 `create-proactive-source` skill，再决定是否新增 MCP server。
+
 ## 注意
 
-- source 配置不保存 Telegram token 或 LLM API key。
+- source 配置不保存 Telegram token、QQ secret、LLM API key 或 cookie。
 - 读到空 feed 不代表错误，可能只是暂时没有新内容。
-- 主动发送仍受 `daily_max`、cooldown、presence busy 限制。
+- 修改 MCP 或 proactive source 配置后，提醒用户执行 `/mcp_reload` 或重启 agent。
+- 主动发送仍受 daily cap、cooldown、quiet hours、presence busy、dedupe 等限制。

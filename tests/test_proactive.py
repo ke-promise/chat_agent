@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -168,6 +169,37 @@ async def test_feed_candidates_are_ranked_globally_not_by_input_order(tmp_path: 
     assert len(channel.sent) == 1
     assert channel.sent[0].content == "我刚刷到一个你可能会感兴趣的小发现，顺手塞给你看看：新鲜高分内容"
     assert manager.acked == ["feed-high"]
+
+
+@pytest.mark.asyncio
+async def test_proactive_drops_recent_similar_topic_delivery(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    await store.add_proactive_delivery(
+        "chat-1",
+        "诶我刚看到鸣潮3.3明天就开服了，二周年版本好像挺大的，新地图黯原还有摩托滑翔啥的～",
+        "drift",
+    )
+    channel = FakeChannel()
+    candidate = _candidate(
+        "drift",
+        "drift-new",
+        "等等，我刚注意到鸣潮明天（4月30号）就要更新3.3版本了，而且还是二周年庆。",
+        priority=1.0,
+        confidence=1.0,
+        novelty=1.0,
+        user_fit=1.0,
+    )
+    loop = _loop(tmp_path, store, channel)
+
+    assert await loop._has_recent_similar_delivery(candidate, utc_now()) is True
+    sent = await loop._deliver_best_candidate([candidate])
+
+    assert sent is False
+    assert channel.sent == []
+    with sqlite3.connect(tmp_path / "agent.sqlite3") as conn:
+        row = conn.execute("SELECT drop_reason FROM proactive_candidates ORDER BY id DESC LIMIT 1").fetchone()
+    assert row == ("recent_topic_duplicate",)
+
 
 @pytest.mark.asyncio
 async def test_fallback_can_send_when_feed_candidates_are_all_duplicates(tmp_path: Path) -> None:
