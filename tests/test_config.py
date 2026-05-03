@@ -45,6 +45,14 @@ def test_load_config_expands_environment(tmp_path: Path, monkeypatch) -> None:
         external_url = "http://localhost:8000"
         external_api_key = "vector-key"
 
+        [reranker]
+        enabled = true
+        model = "bge-reranker-v2-m3"
+        api_key = "${QWEN_API_KEY}"
+        base_url = "https://rerank.example.test/v1"
+        timeout_seconds = 5
+        top_n = 11
+
         [mcp]
         enabled = true
         config_path = "workspace/mcp_servers.json"
@@ -114,11 +122,21 @@ def test_load_config_expands_environment(tmp_path: Path, monkeypatch) -> None:
     assert config.telegram.allow_from == ["alice"]
     assert config.telegram.image_max_mb == 9
     assert config.memory.database_path == tmp_path / "workspace" / "agent.sqlite3"
+    assert config.memory.bm25_top_k == 50
+    assert config.memory.vector_top_k == 50
+    assert config.memory.rrf_top_k == 20
+    assert config.memory.rrf_k == 60
     assert config.embedding.enabled is True
     assert config.embedding.provider == "sqlite_json"
     assert config.embedding.top_k == 7
     assert config.embedding.min_score == 0.3
     assert config.embedding.external_api_key == "vector-key"
+    assert config.reranker.enabled is True
+    assert config.reranker.model == "bge-reranker-v2-m3"
+    assert config.reranker.api_key == "key"
+    assert config.reranker.base_url == "https://rerank.example.test/v1"
+    assert config.reranker.timeout_seconds == 5
+    assert config.reranker.top_n == 11
     assert config.logging.file == tmp_path / "logs" / "test.log"
     assert config.observe.database_path == tmp_path / "observe" / "observe.db"
     assert config.tools.file_workspace == tmp_path / "workspace" / "files"

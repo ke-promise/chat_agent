@@ -45,6 +45,10 @@ enabled = true
 database_path = "workspace/agent.sqlite3"
 history_window = 20
 top_k = 5
+bm25_top_k = 50
+vector_top_k = 50
+rrf_top_k = 20
+rrf_k = 60
 summary_enabled = true
 summary_after_messages = 40
 max_messages_per_chat = 500
@@ -64,6 +68,14 @@ min_score = 0.2
 external_url = "http://localhost:8000" # provider="chroma" 时使用
 external_api_key = ""
 collection = "chat_agent_memories"
+
+[reranker]
+enabled = false
+model = "bge-reranker-v2-m3"
+api_key = "${QWEN_API_KEY}"
+base_url = "https://example.test/v1"
+timeout_seconds = 30
+top_n = 20
 
 [tools]
 tool_calling_enabled = true

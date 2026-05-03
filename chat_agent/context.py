@@ -188,6 +188,11 @@ class ContextBuilder:
             "active_skills_chars": len(active_skills),
             "memory_file_chars": 0,
             "candidates_considered": int(retriever_trace.get("candidates_considered", 0)),
+            "bm25_hits": int(retriever_trace.get("bm25_hits", 0)),
+            "vector_hits": int(retriever_trace.get("vector_hits", 0)),
+            "rrf_candidates": int(retriever_trace.get("rrf_candidates", 0)),
+            "rerank_used": bool(retriever_trace.get("rerank_used")),
+            "rerank_error": str(retriever_trace.get("rerank_error") or ""),
         }
         logger.info(
             "Prompt breakdown chat_id=%s identity_chars=%s history_chars=%s memory_chars=%s tools=%s attachments=%s skills_catalog=%s active_skills=%s total_chars=%s",

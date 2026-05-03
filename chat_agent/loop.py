@@ -12,6 +12,8 @@ from chat_agent.context import ContextBuilder
 from chat_agent.memes import MemeService
 from chat_agent.memory.consolidation import ConsolidationService
 from chat_agent.memory.embeddings import EmbeddingProvider
+from chat_agent.memory.indexer import MemoryIndexer
+from chat_agent.memory.retriever import MemoryRetriever
 from chat_agent.memory.store import SQLiteStore, re_split_query
 from chat_agent.memory.vector_store import VectorStore
 from chat_agent.messages import Attachment, InboundMessage, OutboundMessage
@@ -60,6 +62,8 @@ class AgentLoop:
         summary_after_messages: int = 40,
         embedding_provider: EmbeddingProvider | None = None,
         vector_store: VectorStore | None = None,
+        memory_indexer: MemoryIndexer | None = None,
+        memory_retriever: MemoryRetriever | None = None,
         consolidation_service: ConsolidationService | None = None,
         meme_service: MemeService | None = None,
         model_main: str = "",
@@ -95,6 +99,8 @@ class AgentLoop:
         self.summary_after_messages = summary_after_messages
         self.embedding_provider = embedding_provider
         self.vector_store = vector_store
+        self.memory_indexer = memory_indexer or MemoryIndexer(embedding_provider, vector_store)
+        self.memory_retriever = memory_retriever or getattr(context_builder, "retriever", None)
         self.consolidation_service = consolidation_service
         self.meme_service = meme_service
         self.model_main = model_main
@@ -244,7 +250,11 @@ class AgentLoop:
 
             if RECALL_RE.search(text):
                 query = _normalize_recall_query(text)
-                memories = await self.store.search_memories(message.chat_id, query, limit=5)
+                memories = (
+                    await self.memory_retriever.retrieve(message.chat_id, query, top_k=5)
+                    if self.memory_retriever
+                    else await self.store.search_memories(message.chat_id, query, limit=5)
+                )
                 if memories:
                     lines = "\n".join(f"- #{item['id']} {item['content']}" for item in memories)
                     return f"我翻了翻记忆小本本，找到这些：\n{lines}"
@@ -444,16 +454,7 @@ class AgentLoop:
             memory_id: 已写入 SQLite 的长期记忆 ID。
             content: 需要向量化的记忆正文。
         """
-        if not self.embedding_provider or not self.vector_store:
-            return
-        try:
-            embedding = await self.embedding_provider.embed(content)
-            if embedding:
-                await self.vector_store.upsert_memory(chat_id, memory_id, embedding)
-        except NotImplementedError as exc:
-            logger.warning("Memory embedding store unavailable: %s", exc)
-        except Exception:
-            logger.exception("Failed to embed memory id=%s chat_id=%s", memory_id, chat_id)
+        await self.memory_indexer.index_memory(chat_id, memory_id, content)
 
     def _decorate_outbound(self, message: InboundMessage, outbound: OutboundMessage) -> OutboundMessage:
         """根据表情包策略为被动回复补充出站附件。

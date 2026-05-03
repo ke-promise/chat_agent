@@ -24,6 +24,8 @@ def build_default_registry(
     file_workspace: Path | str = Path("workspace/files"),
     skills_loader: SkillsLoader | None = None,
     extra_model_tools: list[str] | None = None,
+    memory_indexer: Any | None = None,
+    memory_retriever: Any | None = None,
 ) -> ToolRegistry:
     """构建项目默认工具注册表。
 
@@ -68,6 +70,8 @@ def build_default_registry(
             source_kind="explicit",
             confidence=1.0,
         )
+        if memory_indexer:
+            await memory_indexer.index_memory(context.message.chat_id, memory_id, content)
         return f"已保存长期记忆 #{memory_id}。"
 
     async def recall_memory(context: ToolContext, args: dict[str, Any]) -> str:
@@ -82,7 +86,11 @@ def build_default_registry(
         """
         query = str(args.get("query", "")).strip()
         limit = int(args.get("limit", 5))
-        memories = await store.search_memories(context.message.chat_id, query, limit=limit)
+        memories = (
+            await memory_retriever.retrieve(context.message.chat_id, query, top_k=limit)
+            if memory_retriever
+            else await store.search_memories(context.message.chat_id, query, limit=limit)
+        )
         if not memories:
             return "没有找到相关长期记忆。"
         return "\n".join(f"- #{item['id']} {item['content']}" for item in memories)

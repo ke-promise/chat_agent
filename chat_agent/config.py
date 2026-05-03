@@ -109,6 +109,10 @@ class MemoryConfig:
     database_path: Path
     history_window: int
     top_k: int
+    bm25_top_k: int
+    vector_top_k: int
+    rrf_top_k: int
+    rrf_k: int
     summary_enabled: bool
     summary_after_messages: int
     max_messages_per_chat: int
@@ -136,6 +140,18 @@ class EmbeddingConfig:
     external_url: str
     external_api_key: str
     collection: str
+
+
+@dataclass(frozen=True)
+class RerankerConfig:
+    """HTTP reranker 配置，兼容 OpenAI 风格 /rerank 接口。"""
+
+    enabled: bool
+    model: str
+    api_key: str
+    base_url: str
+    timeout_seconds: float
+    top_n: int
 
 
 @dataclass(frozen=True)
@@ -301,6 +317,7 @@ class AppConfig:
     qq: QQBotConfig
     memory: MemoryConfig
     embedding: EmbeddingConfig
+    reranker: RerankerConfig
     reasoner: ReasonerConfig
     proactive: ProactiveConfig
     scheduler: SchedulerConfig
@@ -425,6 +442,7 @@ def load_config(path: str | Path) -> AppConfig:
     qq = raw.get("qq", {})
     memory = raw.get("memory", {})
     embedding = raw.get("embedding", {})
+    reranker = raw.get("reranker", {})
     tools = raw.get("tools", {})
     reasoner = raw.get("reasoner", {})
     proactive = raw.get("proactive", {})
@@ -498,6 +516,10 @@ def load_config(path: str | Path) -> AppConfig:
             database_path=_relative_to_config(config_path, memory.get("database_path", "workspace/agent.sqlite3")),
             history_window=int(memory.get("history_window", memory.get("history_limit", 20))),
             top_k=int(memory.get("top_k", memory.get("memory_limit", 5))),
+            bm25_top_k=int(memory.get("bm25_top_k", 50)),
+            vector_top_k=int(memory.get("vector_top_k", 50)),
+            rrf_top_k=int(memory.get("rrf_top_k", 20)),
+            rrf_k=int(memory.get("rrf_k", 60)),
             summary_enabled=bool(memory.get("summary_enabled", True)),
             summary_after_messages=int(memory.get("summary_after_messages", 40)),
             max_messages_per_chat=int(memory.get("max_messages_per_chat", 500)),
@@ -517,6 +539,14 @@ def load_config(path: str | Path) -> AppConfig:
             external_url=str(embedding.get("external_url", "")),
             external_api_key=str(embedding.get("external_api_key", "")),
             collection=str(embedding.get("collection", "chat_agent_memories")),
+        ),
+        reranker=RerankerConfig(
+            enabled=bool(reranker.get("enabled", False)),
+            model=str(reranker.get("model", "")),
+            api_key=str(reranker.get("api_key", "")),
+            base_url=str(reranker.get("base_url", "")),
+            timeout_seconds=float(reranker.get("timeout_seconds", 30)),
+            top_n=int(reranker.get("top_n", memory.get("rrf_top_k", 20))),
         ),
         tools=ToolsConfig(
             web_fetch_timeout_seconds=int(tools.get("web_fetch_timeout_seconds", 10)),

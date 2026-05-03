@@ -9,6 +9,7 @@ from typing import Any
 
 from chat_agent.memory.embeddings import EmbeddingProvider
 from chat_agent.memory.files import MemoryFiles
+from chat_agent.memory.indexer import MemoryIndexer
 from chat_agent.memory.store import SQLiteStore
 from chat_agent.memory.vector_store import VectorStore
 
@@ -45,6 +46,7 @@ class ConsolidationService:
         provider: Any | None = None,
         embedding_provider: EmbeddingProvider | None = None,
         vector_store: VectorStore | None = None,
+        memory_indexer: MemoryIndexer | None = None,
         keep_recent: int = 20,
         max_window: int = 80,
     ) -> None:
@@ -64,6 +66,7 @@ class ConsolidationService:
         self.provider = provider
         self.embedding_provider = embedding_provider
         self.vector_store = vector_store
+        self.memory_indexer = memory_indexer or MemoryIndexer(embedding_provider, vector_store)
         self.keep_recent = keep_recent
         self.max_window = max_window
 
@@ -245,16 +248,7 @@ class ConsolidationService:
         返回:
             返回与本函数处理结果对应的数据。
         """
-        if not self.embedding_provider or not self.vector_store:
-            return
-        try:
-            embedding = await self.embedding_provider.embed(content)
-            if embedding:
-                await self.vector_store.upsert_memory(chat_id, memory_id, embedding)
-        except NotImplementedError as exc:
-            logger.warning("Memory consolidation embedding unavailable: %s", exc)
-        except Exception:
-            logger.exception("Memory consolidation embedding failed memory_id=%s", memory_id)
+        await self.memory_indexer.index_memory(chat_id, memory_id, content)
 
     async def _export_audit(self, chat_id: str) -> None:
         """处理`audit`。

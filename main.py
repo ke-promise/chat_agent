@@ -347,6 +347,8 @@ async def run_bot(config: AppConfig) -> None:
         from chat_agent.memory.consolidation import ConsolidationService
         from chat_agent.memory.embeddings import EmbeddingProvider
         from chat_agent.memory.files import MemoryFiles
+        from chat_agent.memory.indexer import MemoryIndexer
+        from chat_agent.memory.reranker import HttpReranker
         from chat_agent.memory.retriever import MemoryRetriever
         from chat_agent.memory.store import SQLiteStore
         from chat_agent.memory.vector_store import create_vector_store
@@ -378,14 +380,6 @@ async def run_bot(config: AppConfig) -> None:
         if config.skills.enabled
         else None
     )
-    tools = build_default_registry(
-        store,
-        fetch_timeout=config.tools.web_fetch_timeout_seconds,
-        tool_search_enabled=config.tools.tool_search_enabled,
-        file_workspace=config.tools.file_workspace,
-        skills_loader=skills_loader,
-        extra_model_tools=config.tools.extra_model_tools,
-    )
     main_provider = LLMProvider(config.llm.main)
     fast_provider = LLMProvider(config.llm.fast)
     embedding_provider = (
@@ -400,6 +394,8 @@ async def run_bot(config: AppConfig) -> None:
         else None
     )
     vector_store = create_vector_store(config.embedding, store) if config.embedding.enabled else None
+    memory_indexer = MemoryIndexer(embedding_provider, vector_store)
+    reranker = HttpReranker(config.reranker) if config.reranker.enabled else None
     if config.llm.fast.model == config.llm.main.model and config.llm.fast.base_url == config.llm.main.base_url:
         logging.getLogger(__name__).warning("[llm.fast] uses the same model/base_url as main; this is allowed but less efficient")
     retriever = MemoryRetriever(
@@ -410,8 +406,22 @@ async def run_bot(config: AppConfig) -> None:
         hyde_enabled=config.memory.hyde_enabled,
         embedding_provider=embedding_provider,
         vector_store=vector_store,
-        vector_top_k=config.embedding.top_k,
+        vector_top_k=config.memory.vector_top_k,
         vector_min_score=config.embedding.min_score,
+        bm25_top_k=config.memory.bm25_top_k,
+        rrf_top_k=config.memory.rrf_top_k,
+        rrf_k=config.memory.rrf_k,
+        reranker=reranker,
+    )
+    tools = build_default_registry(
+        store,
+        fetch_timeout=config.tools.web_fetch_timeout_seconds,
+        tool_search_enabled=config.tools.tool_search_enabled,
+        file_workspace=config.tools.file_workspace,
+        skills_loader=skills_loader,
+        extra_model_tools=config.tools.extra_model_tools,
+        memory_indexer=memory_indexer,
+        memory_retriever=retriever,
     )
     mcp_registry = (
         MCPRegistry(
@@ -455,6 +465,7 @@ async def run_bot(config: AppConfig) -> None:
             provider=main_provider,
             embedding_provider=embedding_provider,
             vector_store=vector_store,
+            memory_indexer=memory_indexer,
             keep_recent=config.memory.history_window,
             max_window=max(config.memory.history_window * 4, 40),
         )
@@ -474,6 +485,8 @@ async def run_bot(config: AppConfig) -> None:
         summary_after_messages=config.memory.summary_after_messages,
         embedding_provider=embedding_provider,
         vector_store=vector_store,
+        memory_indexer=memory_indexer,
+        memory_retriever=retriever,
         consolidation_service=consolidation_service,
         meme_service=meme_service,
         model_main=config.llm.main.model,

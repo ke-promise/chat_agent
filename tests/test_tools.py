@@ -21,6 +21,19 @@ class FakeChannel:
         self.sent.append(message)
 
 
+class FakeMemoryIndexer:
+    def __init__(self) -> None:
+        self.indexed = []
+
+    async def index_memory(self, chat_id: str, memory_id: int, content: str) -> None:
+        self.indexed.append((chat_id, memory_id, content))
+
+
+class FakeMemoryRetriever:
+    async def retrieve(self, chat_id: str, query: str, top_k: int):
+        return [{"id": 7, "content": f"retrieved via pipeline: {query}"}]
+
+
 @pytest.mark.asyncio
 async def test_tool_registry_register_and_execute(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "agent.sqlite3")
@@ -32,6 +45,20 @@ async def test_tool_registry_register_and_execute(tmp_path: Path) -> None:
     assert "memorize" in registry.list_descriptions()
     assert "quiet mornings" in recalled
     assert saved
+
+
+@pytest.mark.asyncio
+async def test_memory_tools_use_indexer_and_retriever(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "agent.sqlite3")
+    indexer = FakeMemoryIndexer()
+    registry = build_default_registry(store, memory_indexer=indexer, memory_retriever=FakeMemoryRetriever())
+
+    saved = await registry.execute("memorize", {"content": "likes quiet mornings", "tags": ["preference"]}, _message())
+    recalled = await registry.execute("recall_memory", {"query": "quiet", "limit": 3}, _message())
+
+    assert saved
+    assert indexer.indexed[0][2] == "likes quiet mornings"
+    assert "retrieved via pipeline: quiet" in recalled
 
 
 @pytest.mark.asyncio

@@ -186,6 +186,15 @@ class SQLiteStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_memory_embeddings_chat_id ON memory_embeddings(chat_id);
 
+                CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(
+                    memory_id UNINDEXED,
+                    chat_id UNINDEXED,
+                    content,
+                    tags,
+                    type,
+                    tokenize = "trigram"
+                );
+
                 CREATE TABLE IF NOT EXISTS conversation_summaries (
                     chat_id TEXT PRIMARY KEY,
                     summary TEXT NOT NULL,
@@ -393,6 +402,7 @@ class SQLiteStore:
                 "sent_count": "INTEGER NOT NULL DEFAULT 0",
             }.items():
                 self._ensure_column(conn, "proactive_tick_log", column, definition)
+            self._rebuild_memory_fts(conn)
 
     def _ensure_column(self, conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
         """确保某张表存在指定列，不存在时执行 ALTER TABLE。
@@ -406,6 +416,57 @@ class SQLiteStore:
         columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         if column not in columns:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+    def _rebuild_memory_fts(self, conn: sqlite3.Connection) -> None:
+        """把 active memories 补写到 FTS5 索引，兼容旧库升级。"""
+        indexed = conn.execute("SELECT COUNT(*) AS count FROM memory_fts").fetchone()
+        active = conn.execute("SELECT COUNT(*) AS count FROM memories WHERE status = 'active'").fetchone()
+        if int(indexed["count"] if indexed else 0) >= int(active["count"] if active else 0):
+            return
+        conn.execute("DELETE FROM memory_fts")
+        rows = conn.execute(
+            """
+            SELECT id, chat_id, content, tags, type
+            FROM memories
+            WHERE status = 'active'
+            """
+        ).fetchall()
+        for row in rows:
+            self._upsert_memory_fts_row(conn, row)
+
+    def _upsert_memory_fts_row(self, conn: sqlite3.Connection, row: sqlite3.Row) -> None:
+        """把一行 memory 写入 FTS5 索引。"""
+        memory_id = int(row["id"])
+        conn.execute("DELETE FROM memory_fts WHERE rowid = ?", (memory_id,))
+        conn.execute(
+            """
+            INSERT INTO memory_fts(rowid, memory_id, chat_id, content, tags, type)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                memory_id,
+                memory_id,
+                str(row["chat_id"]),
+                str(row["content"] or ""),
+                _tags_for_fts(row["tags"]),
+                str(row["type"] or "fact"),
+            ),
+        )
+
+    def _sync_memory_fts(self, conn: sqlite3.Connection, memory_id: int) -> None:
+        """根据 memories 当前状态同步单条 FTS5 索引。"""
+        row = conn.execute(
+            """
+            SELECT id, chat_id, content, tags, type
+            FROM memories
+            WHERE id = ? AND status = 'active'
+            """,
+            (memory_id,),
+        ).fetchone()
+        if row is None:
+            conn.execute("DELETE FROM memory_fts WHERE rowid = ?", (memory_id,))
+            return
+        self._upsert_memory_fts_row(conn, row)
 
     async def record_chat(self, chat_id: str, username: str | None) -> None:
         """记录或更新一个统一会话的最后活跃时间。
@@ -781,6 +842,7 @@ class SQLiteStore:
                             memory_id,
                         ),
                     )
+                    self._sync_memory_fts(conn, memory_id)
                     return memory_id
                 cursor = conn.execute(
                     """
@@ -808,7 +870,9 @@ class SQLiteStore:
                         confidence,
                     ),
                 )
-                return int(cursor.lastrowid)
+                memory_id = int(cursor.lastrowid)
+                self._sync_memory_fts(conn, memory_id)
+                return memory_id
 
         return await asyncio.to_thread(run)
 
@@ -1121,6 +1185,51 @@ class SQLiteStore:
 
         return await asyncio.to_thread(run)
 
+    async def search_bm25_memories(self, chat_id: str, query: str, limit: int = 20) -> list[dict[str, Any]]:
+        """用 SQLite FTS5 BM25 搜索长期记忆。"""
+        match_query = _fts_match_query(query)
+        if not match_query:
+            return await self.list_recent_memories(chat_id, limit=limit)
+
+        def run() -> list[dict[str, Any]]:
+            """在线程池中执行 FTS5 查询并转换为 memory row。"""
+            rows: list[sqlite3.Row] = []
+            with self._connect() as conn:
+                try:
+                    rows = conn.execute(
+                        """
+                        SELECT m.*, bm25(memory_fts) AS bm25_rank
+                        FROM memory_fts
+                        JOIN memories m ON m.id = memory_fts.memory_id
+                        WHERE memory_fts MATCH ? AND memory_fts.chat_id = ? AND m.status = 'active'
+                        ORDER BY bm25_rank ASC, m.importance DESC, m.id DESC
+                        LIMIT ?
+                        """,
+                        (match_query, chat_id, limit),
+                    ).fetchall()
+                except sqlite3.OperationalError:
+                    rows = []
+                if not rows:
+                    return []
+                ids = [int(row["id"]) for row in rows]
+                placeholders = ",".join("?" for _ in ids)
+                conn.execute(f"UPDATE memories SET last_used_at = ? WHERE id IN ({placeholders})", [_utc_now_iso(), *ids])
+            result: list[dict[str, Any]] = []
+            for index, row in enumerate(rows):
+                item = _memory_row(row)
+                raw_rank = float(row["bm25_rank"])
+                item["_bm25_score"] = 1.0 / (index + 1) if raw_rank == 0 else max(-raw_rank, 0.0)
+                result.append(item)
+            return result
+
+        hits = await asyncio.to_thread(run)
+        if hits:
+            return hits
+        fallback = await self.search_memories(chat_id, query, limit=limit)
+        for index, item in enumerate(fallback):
+            item["_bm25_score"] = 1.0 / (index + 1)
+        return fallback
+
     async def list_recent_memories(self, chat_id: str, limit: int = 10) -> list[dict[str, Any]]:
         """列出最近/重要的长期记忆，等价于空 query 搜索。"""
         return await self.search_memories(chat_id, "", limit=limit)
@@ -1145,6 +1254,8 @@ class SQLiteStore:
                     "UPDATE memories SET status = 'deleted', updated_at = ? WHERE chat_id = ? AND id = ? AND status = 'active'",
                     (_utc_now_iso(), chat_id, memory_id),
                 )
+                if cursor.rowcount:
+                    self._sync_memory_fts(conn, memory_id)
                 return cursor.rowcount > 0
 
         return await asyncio.to_thread(run)
@@ -1307,6 +1418,7 @@ class SQLiteStore:
                 )
                 if cursor.rowcount <= 0:
                     return False
+                self._sync_memory_fts(conn, old_memory_id)
                 conn.execute(
                     """
                     INSERT INTO memory_replacements(chat_id, old_memory_id, new_memory_id, reason, created_at)
@@ -2234,6 +2346,32 @@ def _normalize_tags(tags: list[str] | str | None) -> list[str]:
 def re_split_query(query: str) -> list[str]:
     """用空格、英文逗号和中文逗号切分简单检索词。"""
     return [term for term in query.replace("，", " ").replace(",", " ").split() if term]
+
+
+def _fts_match_query(query: str) -> str:
+    """把用户查询转换成安全的 FTS5 MATCH 表达式。"""
+    terms = re_split_query(query)
+    if not terms and query.strip():
+        terms = [query.strip()]
+    quoted = []
+    for term in terms:
+        safe = term.replace('"', '""').strip()
+        if safe:
+            quoted.append(f'"{safe}"')
+    return " OR ".join(quoted)
+
+
+def _tags_for_fts(tags: str | None) -> str:
+    """把 tags JSON 转成适合 FTS 的文本。"""
+    if not tags:
+        return ""
+    try:
+        value = json.loads(tags)
+    except json.JSONDecodeError:
+        return tags
+    if isinstance(value, list):
+        return " ".join(str(item) for item in value if str(item).strip())
+    return str(value)
 
 
 def _memory_row(row: sqlite3.Row) -> dict[str, Any]:
